@@ -66,9 +66,13 @@ def _ro(fn, *args):
 
 
 @mcp.tool()
-def search(text: str, limit: int = 10) -> str:
-    """Full-text (BM25) search over notes. Exact hostnames, IPs and versions match literally."""
-    return _ro(query.search, text, min(limit, 50))
+def search(text: str, limit: int = 10, memory: str = "all") -> str:
+    """Full-text (BM25) search over notes. Exact hostnames, IPs and versions match literally.
+
+    Each hit says whether it is agent memory (tag agent-memory) or the owner's own note.
+    memory: "all" (default), "agent" (only agent memory) or "owner" (only the owner's notes).
+    """
+    return _ro(query.search, text, min(limit, 50), memory)
 
 
 @mcp.tool()
@@ -102,6 +106,23 @@ def propose_note(topic: str, title: str, body: str, parent: str | None = None,
         return _WRITE_OFF
     try:
         return _j(proposer.propose_note(topic, title, body, parent, sources))
+    except ProposalError as e:
+        return _j({"error": str(e)})
+
+
+@mcp.tool()
+def propose_edit(topic: str, path: str, body: str, reason: str | None = None) -> str:
+    """Propose a change to an EXISTING note; it lands in the topic's pull request for review.
+
+    Send the complete new body WITHOUT the frontmatter (read the note first and edit its text):
+    the server keeps the frontmatter and bumps `updated`. Works on your own memory notes and on
+    the owner's notes alike, but a note's tags are never touched. `path` is the vault-relative
+    path as returned by search. Never put credentials in the body.
+    """
+    if proposer is None:
+        return _WRITE_OFF
+    try:
+        return _j(proposer.propose_edit(topic, path, body, reason or ""))
     except ProposalError as e:
         return _j({"error": str(e)})
 

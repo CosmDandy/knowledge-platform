@@ -38,6 +38,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
 );
 """
 
+# Bump when what is stored per note changes: the next sync then rebuilds the index from the files.
+FORMAT = 3
 SKIP_DIRS = {"node_modules"}
 WIKILINK = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -59,7 +61,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Subset of YAML sufficient for Obsidian properties: scalars, block lists, inline lists."""
     if not text.startswith("---\n"):
         return {}, text
-    end = text.find("\n---", 4)
+    end = text.find("\n---", 3)  # 3, not 4: an empty block closes right after the opening line
     if end == -1:
         return {}, text
     block, body = text[4:end], text[end + 4:].lstrip("\n")
@@ -124,7 +126,7 @@ def chunk(body: str) -> list[tuple[str, str]]:
     def flush():
         text = "\n".join(buf).strip()
         buf.clear()
-        if not text:
+        if not re.search(r"\w", text):  # empty, or only separators such as ***: nothing to find
             return
         head = " > ".join(h for _, h in stack)
         cur = ""
@@ -188,9 +190,13 @@ def _index_note(con: sqlite3.Connection, root: Path, path: Path, st, digest: str
             con.execute("INSERT INTO edges(src,kind,dst_name) VALUES (?,?,?)", (rel, "LINKS_TO", name))
     al = " ".join(aliases)
     rows = chunk(body) or [("", "")]
+    # Title and aliases go into the first chunk only. In every chunk they would give all chunks
+    # of a note the same title score, and BM25 length normalisation would then pick the shortest
+    # one (often a bare separator) as the best hit for a title match.
     con.executemany(
         "INSERT INTO fts(note_id,heading,title,aliases,body) VALUES (?,?,?,?,?)",
-        [(rel, h, title, al, SENTENCE_DOT.sub(" .", t)) for h, t in rows],
+        [(rel, h, title if i == 0 else "", al if i == 0 else "", SENTENCE_DOT.sub(" .", t))
+         for i, (h, t) in enumerate(rows)],
     )
 
 
@@ -210,6 +216,8 @@ def sync(root: str | Path, db_path: str | Path, full: bool = False, include: lis
     """Bring the index in line with the vault. Cheap on no-op: stat only, hash on mtime change."""
     root = Path(root).resolve()
     con = connect(db_path)
+    stored = con.execute("SELECT v FROM state WHERE k='format'").fetchone()
+    full = full or stored is None or stored[0] != str(FORMAT)  # an old index layout is rebuilt, not patched
     if full:
         con.executescript("DELETE FROM notes; DELETE FROM edges; DELETE FROM fts;")
     known = {r[0]: (r[1], r[2], r[3]) for r in con.execute("SELECT id,mtime_ns,size,hash FROM notes")}
@@ -236,6 +244,7 @@ def sync(root: str | Path, db_path: str | Path, full: bool = False, include: lis
         con.execute("DELETE FROM edges WHERE src=?", (rel,))
         con.execute("DELETE FROM fts WHERE note_id=?", (rel,))
     resolve_edges(con)
+    con.execute("INSERT OR REPLACE INTO state VALUES ('format', ?)", (str(FORMAT),))
     con.execute("INSERT OR REPLACE INTO state VALUES ('root', ?)", (str(root),))
     con.execute("INSERT OR REPLACE INTO state VALUES ('last_sync', ?)", (now,))
     con.commit()

@@ -1,6 +1,7 @@
 """Read-only queries over the index. Every function opens the database read-only."""
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -18,8 +19,22 @@ def _match(terms: list[str], op: str) -> str:
     return f" {op} ".join('"' + t.replace('"', '""') + '"' for t in terms)
 
 
-def search(con: sqlite3.Connection, query: str, limit: int = 10) -> dict:
-    """BM25 over title, aliases and body. Terms are quoted, so hostnames and IPs match literally."""
+AGENT_TAG = "agent-memory"
+# Constant fragments only: `memory` is checked against this table, never interpolated as given.
+_MEMORY_FILTER = {
+    "all": "",
+    "agent": f" AND n.tags LIKE '%\"{AGENT_TAG}\"%'",
+    "owner": f" AND n.tags NOT LIKE '%\"{AGENT_TAG}\"%'",
+}
+
+
+def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "all") -> dict:
+    """BM25 over title, aliases and body. Terms are quoted, so hostnames and IPs match literally.
+
+    `memory` narrows by who keeps the note: "agent" (tagged agent-memory), "owner" (the rest), "all".
+    """
+    if memory not in _MEMORY_FILTER:
+        return {"error": f"memory must be one of {sorted(_MEMORY_FILTER)}"}
     terms = re.findall(r"\S+", query)
     if not terms:
         return {"results": []}
@@ -27,9 +42,10 @@ def search(con: sqlite3.Connection, query: str, limit: int = 10) -> dict:
     for op in ("AND", "OR"):  # fall back to OR only when the strict query finds nothing
         rows = con.execute(
             "SELECT f.note_id, f.heading, snippet(fts, 4, '[', ']', '…', 24) AS snip, "
-            "bm25(fts, 0, 0, 5.0, 3.0, 1.0) AS rank, n.hash, n.indexed_at, n.title "
+            "substr(f.body, 1, 240) AS head, "
+            "bm25(fts, 0, 0, 5.0, 3.0, 1.0) AS rank, n.hash, n.indexed_at, n.title, n.tags "
             "FROM fts f JOIN notes n ON n.id = f.note_id "
-            "WHERE fts MATCH ? ORDER BY rank LIMIT ?",
+            "WHERE fts MATCH ?" + _MEMORY_FILTER[memory] + " ORDER BY rank LIMIT ?",
             (_match(terms, op), limit * 3),
         ).fetchall()
         if rows:
@@ -39,10 +55,14 @@ def search(con: sqlite3.Connection, query: str, limit: int = 10) -> dict:
         if r["note_id"] in seen:
             continue
         seen.add(r["note_id"])
+        # A title-only match leaves the body without a highlight: show where the text starts instead.
+        snippet = r["snip"] if "[" in r["snip"] else " ".join(r["head"].split())
+        tags = json.loads(r["tags"])
         results.append({
-            "path": r["note_id"], "title": r["title"], "heading": r["heading"], "snippet": r["snip"],
-            "rank": len(results) + 1, "bm25": round(r["rank"], 3),
-            "source_hash": r["hash"], "indexed_at": r["indexed_at"],
+            "path": r["note_id"], "title": r["title"], "heading": r["heading"], "snippet": snippet,
+            "tags": tags, "agent_memory": AGENT_TAG in tags,
+            "rank": len(results) + 1,  # 1 is the best; bm25 is the raw score, lower is better
+            "bm25": round(r["rank"], 3), "source_hash": r["hash"], "indexed_at": r["indexed_at"],
         })
         if len(results) == limit:
             break

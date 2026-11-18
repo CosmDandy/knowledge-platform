@@ -57,6 +57,46 @@ class KP(unittest.TestCase):
         self.assertEqual(st["multi_parent_notes"], 1)
         self.assertTrue(st["parent_cycles"])  # Traefik -> Net -> Traefik
 
+    def test_tags_and_memory_filter(self):
+        write(self.root, "A/Mem.md", "---\ntags:\n  - agent-memory\n---\nTraefik memory zebrax.\n")
+        index.sync(self.root, self.db)
+        con = query.open_ro(self.db)
+        hit = query.search(con, "zebrax")["results"][0]
+        self.assertEqual((hit["tags"], hit["agent_memory"]), (["agent-memory"], True))
+        self.assertEqual([h["path"] for h in query.search(con, "Traefik", memory="agent")["results"]], ["A/Mem.md"])
+        owner = [h["path"] for h in query.search(con, "Traefik", memory="owner")["results"]]
+        self.assertEqual(owner, ["A/Traefik.md"])
+        self.assertIn("error", query.search(con, "Traefik", memory="nonsense"))
+
+    def test_snippet_falls_back_to_text_start_on_title_only_match(self):
+        write(self.root, "A/Titleonly.md", "---\n---\nCompletely different words here.\n")
+        index.sync(self.root, self.db)
+        hit = query.search(query.open_ro(self.db), "Titleonly")["results"][0]
+        self.assertTrue(hit["snippet"].startswith("Completely different"))
+
+    def test_title_match_shows_the_start_of_the_note_not_a_short_chunk(self):
+        write(self.root, "A/Alphaname.md", "---\n---\nIntro text of the note.\n\n# Section\n***\n")
+        index.sync(self.root, self.db)
+        hit = query.search(query.open_ro(self.db), "Alphaname")["results"][0]
+        self.assertEqual(hit["heading"], "")
+        self.assertTrue(hit["snippet"].startswith("Intro text"))
+
+    def test_separator_only_chunks_are_not_indexed(self):
+        write(self.root, "A/Gammaname.md", "---\n---\n# Gammaname\n\n***\n\n## Definition\nReal text here.\n")
+        index.sync(self.root, self.db)
+        hit = query.search(query.open_ro(self.db), "Gammaname")["results"][0]
+        self.assertTrue(hit["snippet"].startswith("Real text"))
+
+    def test_old_index_format_is_rebuilt_on_next_sync(self):
+        con = sqlite3.connect(self.db)
+        con.executescript("UPDATE state SET v='1' WHERE k='format'; DELETE FROM fts;")
+        con.commit()
+        con.close()
+        self.assertEqual(query.search(query.open_ro(self.db), "10.0.0.5")["results"], [])
+        r = index.sync(self.root, self.db)  # no file changed: only the stale format forces the work
+        self.assertEqual(r["added"], 3)
+        self.assertEqual(len(query.search(query.open_ro(self.db), "10.0.0.5")["results"]), 1)
+
     def test_path_qualified_link_resolves_by_basename(self):
         write(self.root, "A/Other.md", "см. [[A/Infra]]")
         index.sync(self.root, self.db)

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import re
 import unittest
 import urllib.parse
@@ -11,13 +12,22 @@ class FakeGitHub:
 
     def __init__(self):
         self.branches = {"master": "s0"}
-        self.files = {("master", "01 Архив/Existing.md"): "x"}
+        self.files = {
+            ("master", "01 Архив/Existing.md"):
+                '---\nparent: "[[Infra]]"\ntags:\n  - 1_Исследуется\ncreated: 2025-01-01\nupdated: 2025-01-01\n---\n'
+                "Old body.\n",
+            ("master", "01 Архив/Memo.md"):
+                "---\ntags:\n  - agent-memory\ncreated: 2025-01-01\nupdated: 2025-01-01\n---\nMemo text.\n",
+        }
         self.prs = []
+        self.commits = []
 
-    def _file(self, ref, path):
+    def _text(self, ref, path):
         if (ref, path) in self.files:
-            return True
-        return ref != "master" and ref in self.branches and ("master", path) in self.files
+            return self.files[(ref, path)]
+        if ref != "master" and ref in self.branches:
+            return self.files.get(("master", path))
+        return None
 
     def request(self, method, path, body=None):
         path = urllib.parse.unquote(path)
@@ -30,9 +40,17 @@ class FakeGitHub:
         if m := re.fullmatch(r"/contents/(.+)", route):
             file = m[1]
             if method == "GET":
-                ref = path.split("ref=")[1]
-                return (200, {}) if self._file(ref, file) else (404, {"message": "Not Found"})
+                text = self._text(path.split("ref=")[1], file)
+                if text is None:
+                    return 404, {"message": "Not Found"}
+                return 200, {"sha": hashlib.sha1(text.encode()).hexdigest(),
+                             "content": base64.b64encode(text.encode()).decode()}
+            if "sha" in body:  # updating: the sha must match what the branch holds now
+                current = self._text(body["branch"], file)
+                if current is None or hashlib.sha1(current.encode()).hexdigest() != body["sha"]:
+                    return 409, {"message": "sha mismatch"}
             self.files[(body["branch"], file)] = base64.b64decode(body["content"]).decode()
+            self.commits.append(body["message"])
             return 201, {}
         if route == "/git/ref/heads/master":
             return 200, {"object": {"sha": "s0"}}
@@ -81,7 +99,48 @@ class ProposalTests(unittest.TestCase):
         text = self.gh.files[("knowledge/traefik", "01 Архив/Traefik.md")]
         self.assertIn('parent: "[[Инфраструктура]]"', text)
         self.assertIn('  - "claude memory 2026-11-18"', text)
+        self.assertIn("tags:\n  - agent-memory\n", text)  # a created note is agent memory
         self.assertEqual(len(self.gh.prs), 1)
+
+    def test_edit_keeps_owner_note_tags_and_bumps_updated(self):
+        r = self.p.propose_edit("fixes", "01 Архив/Existing.md", "New body.", reason="stale")
+        self.assertTrue(r["owner_note"])
+        text = self.gh.files[("knowledge/fixes", "01 Архив/Existing.md")]
+        self.assertIn("tags:\n  - 1_Исследуется\n", text)
+        self.assertNotIn("agent-memory", text)           # the tag is never added to the owner's note
+        self.assertIn('parent: "[[Infra]]"', text)
+        self.assertIn("created: 2025-01-01", text)
+        self.assertNotIn("updated: 2025-01-01", text)
+        self.assertTrue(text.endswith("---\nNew body.\n"))
+        self.assertIn("(owner's note)", self.gh.commits[-1])
+        self.assertIn("stale", self.gh.commits[-1])
+
+    def test_edit_of_agent_memory_is_labelled_and_shares_the_topic_pr(self):
+        self.p.propose_note("t", "A", "one")
+        r = self.p.propose_edit("t", "01 Архив/Memo.md", "Updated memo.")
+        self.assertFalse(r["owner_note"])
+        self.assertFalse(r["new_pr"])
+        self.assertEqual(len(self.gh.prs), 1)
+        self.assertIn("(agent-memory)", self.gh.commits[-1])
+
+    def test_second_edit_of_same_note_builds_on_the_branch_version(self):
+        self.p.propose_edit("t", "01 Архив/Existing.md", "First.")
+        self.p.propose_edit("t", "01 Архив/Existing.md", "Second.")
+        self.assertTrue(self.gh.files[("knowledge/t", "01 Архив/Existing.md")].endswith("Second.\n"))
+
+    def test_edit_rejections(self):
+        bad = [
+            ("t", "01 Архив/Nope.md", "x"),                  # does not exist
+            ("t", "03 Дневник/x.md", "x"),                   # outside the notes folder
+            ("t", "01 Архив/../secret.md", "x"),             # traversal
+            ("t", "01 Архив/Existing.md", "Old body."),      # no change
+            ("t", "01 Архив/Existing.md", "token: " + "z" * 12),  # credential
+            ("", "01 Архив/Existing.md", "x"),               # no topic
+        ]
+        for topic, path, body in bad:
+            with self.assertRaises(ProposalError, msg=path + body):
+                self.p.propose_edit(topic, path, body)
+        self.assertEqual(self.gh.commits, [])
 
     def test_same_topic_reuses_branch_and_pr(self):
         self.p.propose_note("Traefik", "A", "one")

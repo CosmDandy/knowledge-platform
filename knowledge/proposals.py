@@ -18,6 +18,8 @@ from .index import SECRET_LINE
 
 FORBIDDEN_TITLE = re.compile(r'[\\/:*?"<>|#^\[\]\n\r\t]')
 MAX_BODY = 200_000
+# Marks notes that are the agent's memory, not the owner's knowledge. Set only on creation.
+AGENT_TAG = "agent-memory"
 
 
 class ProposalError(Exception):
@@ -112,7 +114,7 @@ class Proposer:
         head = ["---"]
         if parent:
             head.append(f"parent: {json.dumps(f'[[{parent}]]', ensure_ascii=False)}")
-        head += [f"created: {today}", f"updated: {today}"]
+        head += [f"created: {today}", f"updated: {today}", "tags:", f"  - {AGENT_TAG}"]
         if sources:
             head.append("sources:")
             head += [f"  - {json.dumps(s, ensure_ascii=False)}" for s in sources]
@@ -130,13 +132,9 @@ class Proposer:
         if status not in (201, 422):  # 422: another agent created it first, which is fine
             raise ProposalError(f"cannot create branch {branch}: {status} {(body or {}).get('message', '')}")
 
-    def propose_note(self, topic: str, title: str, body: str, parent: str | None = None,
-                     sources: list[str] | None = None) -> dict:
-        sources = sources or []
-        slug = self._validate(topic, title, body, parent, sources)
-        branch, path = f"{self.prefix}/{slug}", f"{self.folder}/{title}.md"
-        if self.exists(title) or self._file_exists(path, self.base):
-            raise ProposalError(f"a note named '{title}' already exists; propose a different title")
+    def _join_topic(self, slug: str):
+        """Return (branch, open PR or None). A new topic gets its branch; a full PR is refused."""
+        branch = f"{self.prefix}/{slug}"
         open_prs = self._open_prs()
         pr = next((p for p in open_prs if p["head"]["ref"] == branch), None)
         if pr:
@@ -147,6 +145,34 @@ class Proposer:
             if len(open_prs) >= self.max_open:
                 raise ProposalError(f"{self.max_open} proposals are already open; wait for review")
             self._ensure_branch(branch)
+        return branch, pr
+
+    def _ensure_pr(self, topic: str, branch: str, pr):
+        """Open the PR for a topic on its first change. Returns (pr, is_new)."""
+        if pr is not None:
+            return pr, False
+        status, data = self.gh.request("POST", "/pulls", {
+            "title": f"knowledge: {topic.strip()[:80]}", "head": branch, "base": self.base,
+            "body": "Changes proposed by an agent through the knowledge MCP server. "
+                    "Review the diff, then merge or close; the branch is deleted afterwards.",
+        })
+        if status == 201:
+            return data, True
+        # 422: a concurrent agent opened it between our check and now
+        pr = next((p for p in self._open_prs() if p["head"]["ref"] == branch), None)
+        if pr is None:
+            raise ProposalError(f"cannot open PR: {status} {(data or {}).get('message', '')}")
+        return pr, False
+
+    def propose_note(self, topic: str, title: str, body: str, parent: str | None = None,
+                     sources: list[str] | None = None) -> dict:
+        """Create a new note. It is agent memory by definition, so it carries the agent tag."""
+        sources = sources or []
+        slug = self._validate(topic, title, body, parent, sources)
+        path = f"{self.folder}/{title}.md"
+        if self.exists(title) or self._file_exists(path, self.base):
+            raise ProposalError(f"a note named '{title}' already exists; propose a different title")
+        branch, pr = self._join_topic(slug)
         if self._file_exists(path, branch):
             raise ProposalError(f"'{title}' is already proposed in topic '{slug}'")
         self._call("PUT", f"/contents/{_q(path)}", {
@@ -154,21 +180,48 @@ class Proposer:
             "content": base64.b64encode(self._render(title, body, parent, sources).encode()).decode(),
             "branch": branch,
         })
-        new_pr = pr is None
-        if new_pr:
-            status, data = self.gh.request("POST", "/pulls", {
-                "title": f"knowledge: {topic.strip()[:80]}", "head": branch, "base": self.base,
-                "body": "Notes proposed by an agent through the knowledge MCP server. "
-                        "Review the diff, then merge or close; the branch is deleted afterwards.",
-            })
-            if status == 201:
-                pr = data
-            else:  # 422: a concurrent agent opened it between our check and now
-                pr = next((p for p in self._open_prs() if p["head"]["ref"] == branch), None)
-                if pr is None:
-                    raise ProposalError(f"cannot open PR: {status} {(data or {}).get('message', '')}")
-                new_pr = False
+        pr, new_pr = self._ensure_pr(topic, branch, pr)
         return {"pr": pr["html_url"], "branch": branch, "path": path, "new_pr": new_pr}
+
+    def propose_edit(self, topic: str, path: str, body: str, reason: str = "") -> dict:
+        """Replace the body of an existing note. Frontmatter is kept as it is, apart from `updated`.
+
+        The agent tag is never added here: a note the owner wrote stays the owner's, and only
+        notes created through propose_note carry the tag.
+        """
+        if not (topic or "").strip():
+            raise ProposalError("topic is empty: name the subject this change belongs to")
+        if (not path.startswith(self.folder + "/") or not path.endswith(".md")
+                or ".." in path.split("/") or "\\" in path):
+            raise ProposalError(f"path must be a note under '{self.folder}/', as returned by search")
+        if not body.strip() or len(body) > MAX_BODY:
+            raise ProposalError(f"body must be non-empty and at most {MAX_BODY} chars")
+        if SECRET_LINE.search(body) or "PRIVATE KEY" in body:
+            raise ProposalError("body looks like it contains a credential: remove it and refer to the secret store")
+        if len(reason) > 300 or "\n" in reason:
+            raise ProposalError("reason: one line, at most 300 chars")
+        if not self._file_exists(path, self.base):
+            raise ProposalError(f"no such note: {path}; use propose_note to create a new one")
+        branch, pr = self._join_topic(slugify(topic))
+        current = self._call("GET", f"/contents/{_q(path)}?ref={_q(branch)}")
+        old = base64.b64decode(current["content"]).decode()
+        match = re.match(r"\A---\n.*?\n---\n?", old, re.DOTALL)
+        front, old_body = (old[:match.end()], old[match.end():]) if match else ("", old)
+        if old_body.strip() == body.strip():
+            raise ProposalError("the new body is identical to the current one")
+        today = datetime.date.today().isoformat()
+        front = re.sub(r"(?m)^updated:.*$", f"updated: {today}", front, count=1)
+        whose = AGENT_TAG if re.search(rf"(?m)^\s*-\s*{re.escape(AGENT_TAG)}\s*$", front) else "owner's note"
+        title = path.rsplit("/", 1)[-1][:-3]
+        self._call("PUT", f"/contents/{_q(path)}", {
+            "message": f"knowledge: edit {title} ({whose})" + (f"\n\n{reason}" if reason else ""),
+            "content": base64.b64encode((front + body.strip() + "\n").encode()).decode(),
+            "sha": current["sha"],
+            "branch": branch,
+        })
+        pr, new_pr = self._ensure_pr(topic, branch, pr)
+        return {"pr": pr["html_url"], "branch": branch, "path": path, "new_pr": new_pr,
+                "owner_note": whose != AGENT_TAG}
 
     def cleanup(self) -> list[str]:
         """Delete topic branches that have no open PR (merged or closed).
