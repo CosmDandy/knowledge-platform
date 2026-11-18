@@ -5,7 +5,7 @@ Read-only индексатор Markdown + граф ссылок + MCP-серве
 ## Как это устроено
 
 ```
-vault (~/KnowledgeBase, :ro) ─► индексатор (SQLite FTS5 + граф) ─► MCP по HTTP на tailnet-адресе
+vault (~/knowledge, :ro) ─► индексатор (SQLite FTS5 + граф) ─► MCP по HTTP на tailnet-адресе
                                                                        │
                         propose_note ─► GitHub: ветка knowledge/<тема> ─► один PR на тему
 ```
@@ -39,7 +39,7 @@ Fine-grained PAT на один репозиторий (vault): Contents и Pull 
 ## Без контейнера
 
 ```sh
-python3 -m knowledge sync --vault ~/KnowledgeBase --db ~/knowledge.db --include "01 Архив"
+python3 -m knowledge sync --vault ~/knowledge --db ~/knowledge.db --include "01 Архив"
 python3 -m knowledge search "hhh-sto-02" --db ~/knowledge.db
 python3 -m unittest discover -s tests -t .
 ```

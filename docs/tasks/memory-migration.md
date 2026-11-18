@@ -27,7 +27,7 @@ Rules:
    line saying what the old memory claimed.
 7. Topic per project: `<project>-memory` (e.g. `code-kvt-memory`), so one project is one PR. A PR holds at most
    20 files; split the topic (`code-kvt-memory-infra`, ...) if needed.
-8. Never call a note saved: it exists after the owner merges the PR and `~/KnowledgeBase` is pulled on the Mac.
+8. Never call a note saved: it exists after the owner merges the PR and `~/knowledge` is pulled on the Mac.
    Report the PR link, the list of notes, and what was left out and why.
 
 Verification before reporting: `search` finds each new title and one fact from it after the merge and pull;

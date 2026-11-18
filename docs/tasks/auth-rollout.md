@@ -7,7 +7,7 @@ Report in the format at the end.
 ## Facts (verified 2026-11-18, do not re-verify)
 
 - Server: `~/knowledge-platform` (repo `CosmDandy/knowledge-platform`, branch `master`). Container `knowledge-mcp`
-  on the Mac, published at `http://100.64.0.1:7234/mcp` (tailnet). Index of `~/KnowledgeBase/01 Архив`.
+  on the Mac, published at `http://100.64.0.1:7234/mcp` (tailnet). Index of `~/knowledge/01 Архив`.
 - Server-side auth is DONE and committed (`5aab9c2`, `knowledge/auth.py`): every HTTP request needs
   `Authorization: Bearer <token>`; token read from `/run/secrets/knowledge_token` (compose secret from
   env `KNOWLEDGE_MCP_TOKEN`); the server refuses to start without it unless `KNOWLEDGE_AUTH=off`.
@@ -40,7 +40,7 @@ Report in the format at the end.
 
 1. **Pick the client auth method by testing, not by docs.** Public reports conflict on whether
    `headers: {"Authorization": "Bearer ${VAR}"}` expands in user-scope config. Start a throwaway server:
-   `docker run -d --name knowledge-auth-test -p 127.0.0.1:7299:7234 -v "$HOME/KnowledgeBase:/vault:ro"
+   `docker run -d --name knowledge-auth-test -p 127.0.0.1:7299:7234 -v "$HOME/knowledge:/vault:ro"
    -v "$HOME/.config/knowledge-platform/token:/run/secrets/knowledge_token:ro" --read-only --tmpfs /tmp
    --tmpfs /data:uid=10001 --cap-drop ALL knowledge-platform:latest`. Register it under a TEMPORARY name
    with (a) `headersHelper` pointing at a small script that prints `{"Authorization":"Bearer <file contents>"}`

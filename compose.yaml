@@ -15,7 +15,7 @@ services:
       - "${KNOWLEDGE_BIND:-127.0.0.1}:${KNOWLEDGE_PORT:-7234}:7234"
     volumes:
       # Read-only: the server cannot change the vault even by mistake.
-      - "${KNOWLEDGE_VAULT_PATH:-${HOME}/KnowledgeBase}:/vault:ro"
+      - "${KNOWLEDGE_VAULT_PATH:-${HOME}/knowledge}:/vault:ro"
       - knowledge-data:/data
     environment:
       KNOWLEDGE_INCLUDE: "${KNOWLEDGE_INCLUDE-01 Архив}"
