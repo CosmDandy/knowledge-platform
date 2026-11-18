@@ -1,0 +1,32 @@
+services:
+  knowledge:
+    build: .
+    container_name: knowledge-mcp
+    restart: unless-stopped
+    ports:
+      # The tailnet address of this machine; loopback until you set it, so a machine without
+      # tailscale up still starts.
+      - "${KNOWLEDGE_BIND:-127.0.0.1}:${KNOWLEDGE_PORT:-7234}:7234"
+    volumes:
+      # Read-only: the server cannot change the vault even by mistake.
+      - "${KNOWLEDGE_VAULT_PATH:-${HOME}/KnowledgeBase}:/vault:ro"
+      - knowledge-data:/data
+    environment:
+      KNOWLEDGE_INCLUDE: "${KNOWLEDGE_INCLUDE-01 Архив}"
+      KNOWLEDGE_GITHUB_REPO: "${KNOWLEDGE_GITHUB_REPO:-CosmDandy/KnowledgeBase}"
+      # Empty keeps the write tools off. Supply it from sops: sops exec-env secrets.sops.yaml 'docker compose up -d'
+      KNOWLEDGE_GITHUB_TOKEN: "${KNOWLEDGE_GITHUB_TOKEN:-}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 7234), 2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  knowledge-data:

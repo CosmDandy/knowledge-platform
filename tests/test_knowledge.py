@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kp import index, query
+from knowledge import index, query
 
 
 def write(root: Path, rel: str, text: str) -> Path:

@@ -153,12 +153,15 @@ def chunk(body: str) -> list[tuple[str, str]]:
     return chunks
 
 
-def iter_markdown(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS]
-        for f in filenames:
-            if f.endswith(".md") and not f.startswith("."):
-                yield Path(dirpath) / f
+def iter_markdown(root: Path, include: list[str] | None = None):
+    """Yield .md files; with `include`, only those under the given vault-relative folders."""
+    starts = [root / i for i in include] if include else [root]
+    for start in starts:
+        for dirpath, dirnames, filenames in os.walk(start):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS]
+            for f in filenames:
+                if f.endswith(".md") and not f.startswith("."):
+                    yield Path(dirpath) / f
 
 
 def _index_note(con: sqlite3.Connection, root: Path, path: Path, st, digest: str, now: str) -> None:
@@ -203,7 +206,7 @@ def resolve_edges(con: sqlite3.Connection) -> None:
                      for rid, n in rows])
 
 
-def sync(root: str | Path, db_path: str | Path, full: bool = False) -> dict:
+def sync(root: str | Path, db_path: str | Path, full: bool = False, include: list[str] | None = None) -> dict:
     """Bring the index in line with the vault. Cheap on no-op: stat only, hash on mtime change."""
     root = Path(root).resolve()
     con = connect(db_path)
@@ -213,7 +216,7 @@ def sync(root: str | Path, db_path: str | Path, full: bool = False) -> dict:
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     added = changed = 0
     on_disk = set()
-    for path in iter_markdown(root):
+    for path in iter_markdown(root, include):
         rel = path.relative_to(root).as_posix()
         on_disk.add(rel)
         st = path.stat()
