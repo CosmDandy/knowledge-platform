@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import hashlib
 import json
 import re
 import urllib.error
@@ -50,9 +51,19 @@ class GitHub:
             return e.code, json.loads(raw) if raw else None
 
 
+_TRANSLIT = dict(zip(
+    "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+    ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s", "t",
+     "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya"],
+    strict=True,
+))
+
+
 def slugify(topic: str) -> str:
-    slug = re.sub(r"[^\w]+", "-", topic.strip().lower()).strip("-_")
-    return slug[:50].strip("-_")
+    """ASCII only: GitHub flags non-ASCII branch names as possibly containing hidden characters."""
+    slug = "".join(_TRANSLIT.get(c, c) for c in topic.strip().lower())
+    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")[:50].strip("-")
+    return slug or "topic-" + hashlib.sha1(topic.encode()).hexdigest()[:8]
 
 
 def _q(s: str) -> str:
@@ -81,9 +92,9 @@ class Proposer:
                  "pr": p["html_url"], "title": p["title"]} for p in self._open_prs()]
 
     def _validate(self, topic, title, body, parent, sources) -> str:
-        slug = slugify(topic or "")
-        if not slug:
+        if not (topic or "").strip():
             raise ProposalError("topic is empty: name the subject this note belongs to")
+        slug = slugify(topic)
         if not title or len(title) > 120 or FORBIDDEN_TITLE.search(title) or title.startswith("."):
             raise ProposalError("title must be 1-120 chars without / \\ : * ? \" < > | # ^ [ ] or line breaks")
         if not body.strip() or len(body) > MAX_BODY:

@@ -67,8 +67,12 @@ class ProposalTests(unittest.TestCase):
         self.gh = FakeGitHub()
         self.p = Proposer(self.gh, exists=lambda t: t == "InIndex")
 
-    def test_slug_keeps_cyrillic(self):
-        self.assertEqual(slugify("Миграция памяти Claude!"), "миграция-памяти-claude")
+    def test_slug_is_ascii(self):
+        self.assertEqual(slugify("Миграция памяти Claude!"), "migratsiya-pamyati-claude")
+        self.assertEqual(slugify("Щука"), "shchuka")
+        self.assertTrue(slugify("日本語").startswith("topic-"))  # nothing transliterable: stable hash
+        self.assertEqual(slugify("日本語"), slugify("日本語"))
+        self.assertTrue(slugify("Проверка Knowledge MCP").isascii())
 
     def test_first_proposal_opens_branch_and_pr(self):
         r = self.p.propose_note("Traefik", "Traefik", "Reverse proxy.", parent="Инфраструктура",
