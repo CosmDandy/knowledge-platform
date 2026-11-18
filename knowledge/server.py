@@ -13,7 +13,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-from . import embeddings, index, query
+from . import auth, embeddings, index, query
 from .proposals import GitHub, ProposalError, Proposer
 
 VAULT = os.environ.get("KNOWLEDGE_VAULT", "/vault")
@@ -199,11 +199,16 @@ def main_http() -> None:
           file=sys.stderr, flush=True)
     threading.Thread(target=_maintenance, daemon=True).start()
     host = os.environ.get("KNOWLEDGE_HOST", "127.0.0.1")
-    # NOTE: no auth by design; the container port is published on the tailnet address only.
+    # The port is published on the tailnet address only, and every request needs the bearer token.
     app = mcp.streamable_http_app(
         host=host,
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
+    if os.environ.get("KNOWLEDGE_AUTH", "on") != "off":
+        app = auth.BearerAuth(app, auth.load_token())
+    else:
+        print("WARNING: auth is off, anyone who reaches the port can read and propose notes",
+              file=sys.stderr, flush=True)
     config = uvicorn.Config(app, host=host, port=int(os.environ.get("KNOWLEDGE_PORT", "7234")),
                             log_level="info")
     anyio.run(uvicorn.Server(config).serve)

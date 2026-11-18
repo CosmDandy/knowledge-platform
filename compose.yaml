@@ -24,6 +24,10 @@ services:
       KNOWLEDGE_GITHUB_REPO: "${KNOWLEDGE_GITHUB_REPO:-CosmDandy/knowledge}"
       # Empty keeps the write tools off. Supply it from sops: sops exec-env secrets.sops.yaml 'docker compose up -d'
       KNOWLEDGE_GITHUB_TOKEN: "${KNOWLEDGE_GITHUB_TOKEN:-}"
+    # The MCP bearer token, from sops (KNOWLEDGE_MCP_TOKEN): mounted as /run/secrets/knowledge_token,
+    # not as an env var, so `docker inspect` does not show it.
+    secrets:
+      - knowledge_token
     read_only: true
     tmpfs:
       - /tmp
@@ -35,6 +39,10 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+secrets:
+  knowledge_token:
+    environment: KNOWLEDGE_MCP_TOKEN
 
 volumes:
   knowledge-data:
