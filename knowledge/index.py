@@ -159,13 +159,17 @@ def chunk(body: str) -> list[tuple[str, str]]:
 
 
 def iter_markdown(root: Path, include: list[str] | None = None):
-    """Yield .md files; with `include`, only those under the given vault-relative folders."""
+    """Yield .md files; with `include`, only those under the given vault-relative folders.
+
+    Excalidraw drawings are `*.excalidraw.md` files holding a JSON scene, not prose: they would add
+    noise chunks to every search.
+    """
     starts = [root / i for i in include] if include else [root]
     for start in starts:
         for dirpath, dirnames, filenames in os.walk(start):
             dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS]
             for f in filenames:
-                if f.endswith(".md") and not f.startswith("."):
+                if f.endswith(".md") and not f.startswith(".") and not f.endswith(".excalidraw.md"):
                     yield Path(dirpath) / f
 
 

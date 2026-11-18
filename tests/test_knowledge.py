@@ -32,6 +32,12 @@ class KP(unittest.TestCase):
         self.con.close()
         self.tmp.cleanup()
 
+    def test_excalidraw_drawings_are_not_indexed(self):
+        write(self.root, "A/Scheme.excalidraw.md", "---\nexcalidraw-plugin: parsed\n---\n```json\n{\"zzquux\": 1}\n```\n")
+        index.sync(self.root, self.db)
+        self.assertEqual(query.search(self.con, "zzquux")["results"], [])
+        self.assertEqual(query.status(self.con)["notes"], 3)
+
     def test_hidden_dirs_skipped(self):
         self.assertEqual(query.status(self.con)["notes"], 3)
 
