@@ -94,18 +94,21 @@ def status() -> str:
 
 
 @mcp.tool()
-def propose_note(topic: str, title: str, body: str, parent: str | None = None,
-                 sources: list[str] | None = None) -> str:
+def propose_note(topic: str, title: str, body: str, parent: str | list[str] | None = None,
+                 links: list[str] | None = None, aliases: list[str] | None = None) -> str:
     """Propose a NEW note. It lands in a pull request, never directly in the vault.
 
+    The note is created from the owner's template: created/updated dates, aliases, parent,
+    links, the tag agent-memory, then a `# <title>` heading (added for you when the body has
+    none). `parent` is the hub note this one belongs under (for example "code-kvt"), `links`
+    are related notes; both are plain note names and may point at notes that do not exist yet.
     All notes with the same topic share one branch and one PR, so pick one topic per subject
-    and reuse it. Existing notes cannot be changed or deleted this way. `parent` is a plain
-    note name; `sources` says where the facts come from. Never put credentials in the body.
+    and reuse it. Never put credentials in the body.
     """
     if proposer is None:
         return _WRITE_OFF
     try:
-        return _j(proposer.propose_note(topic, title, body, parent, sources))
+        return _j(proposer.propose_note(topic, title, body, parent, links, aliases))
     except ProposalError as e:
         return _j({"error": str(e)})
 

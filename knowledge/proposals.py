@@ -79,6 +79,11 @@ class Proposer:
         self.max_open, self.max_files, self.exists = max_open, max_files, exists
         self._orphans: set[str] = set()
 
+    def _guard(self, branch: str) -> None:
+        """The one rule behind every write: only topic branches, never the base branch."""
+        if branch == self.base or not branch.startswith(self.prefix + "/") or len(branch) == len(self.prefix) + 1:
+            raise ProposalError(f"refusing to write to '{branch}': only {self.prefix}/<topic> branches are allowed")
+
     def _call(self, method, path, body=None, ok=(200, 201, 204)):
         status, data = self.gh.request(method, path, body)
         if status not in ok:
@@ -93,7 +98,26 @@ class Proposer:
         return [{"topic": p["head"]["ref"][len(self.prefix) + 1:], "branch": p["head"]["ref"],
                  "pr": p["html_url"], "title": p["title"]} for p in self._open_prs()]
 
-    def _validate(self, topic, title, body, parent, sources) -> str:
+    @staticmethod
+    def _names(values, what: str) -> list[str]:
+        """Plain note names; [[wrapped]] ones are accepted and unwrapped."""
+        if not values:
+            return []
+        out = []
+        for v in [values] if isinstance(values, str) else values:
+            v = v.strip()
+            if wrapped := re.fullmatch(r"\[\[(.+)\]\]", v):
+                v = wrapped[1].strip()
+            if not v:
+                continue
+            if len(v) > 120 or re.search(r"[\[\]\n|#^]", v):
+                raise ProposalError(f"{what}: plain note names up to 120 chars, without [ ] | # ^ or line breaks")
+            out.append(v)
+        if len(out) > 20:
+            raise ProposalError(f"{what}: at most 20 entries")
+        return out
+
+    def _validate(self, topic, title, body) -> str:
         if not (topic or "").strip():
             raise ProposalError("topic is empty: name the subject this note belongs to")
         slug = slugify(topic)
@@ -103,29 +127,29 @@ class Proposer:
             raise ProposalError(f"body must be non-empty and at most {MAX_BODY} chars")
         if SECRET_LINE.search(body) or "PRIVATE KEY" in body:
             raise ProposalError("body looks like it contains a credential: remove it and refer to the secret store")
-        if parent and re.search(r"[\[\]\n]", parent):
-            raise ProposalError("parent is a plain note name, without [[ ]]")
-        if len(sources) > 20 or any(len(s) > 300 or "\n" in s for s in sources):
-            raise ProposalError("sources: at most 20 single-line entries of 300 chars")
         return slug
 
-    def _render(self, title, body, parent, sources) -> str:
+    def _render(self, title, body, parents, links, aliases) -> str:
+        """The owner's template: created, updated, aliases, parent, links, tags, then `# Title`."""
         today = datetime.date.today().isoformat()
-        head = ["---"]
-        if parent:
-            head.append(f"parent: {json.dumps(f'[[{parent}]]', ensure_ascii=False)}")
-        head += [f"created: {today}", f"updated: {today}", "tags:", f"  - {AGENT_TAG}"]
-        if sources:
-            head.append("sources:")
-            head += [f"  - {json.dumps(s, ensure_ascii=False)}" for s in sources]
-        head.append("---")
-        return "\n".join(head) + "\n" + body.strip() + "\n"
+
+        def field(key, items, wrap):
+            return [f"{key}:"] + [f"  - {json.dumps(f'[[{i}]]' if wrap else i, ensure_ascii=False)}" for i in items]
+
+        head = ["---", f"created: {today}", f"updated: {today}"]
+        head += field("aliases", aliases, False) + field("parent", parents, True) + field("links", links, True)
+        head += ["tags:", f"  - {AGENT_TAG}", "---"]
+        text = body.strip()
+        if not re.match(r"#\s+\S", text):  # every note opens with its own title
+            text = f"# {title}\n\n{text}"
+        return "\n".join(head) + "\n" + text + "\n"
 
     def _file_exists(self, path: str, ref: str) -> bool:
         status, _ = self.gh.request("GET", f"/contents/{_q(path)}?ref={_q(ref)}")
         return status == 200
 
     def _ensure_branch(self, branch: str) -> None:
+        self._guard(branch)
         data = self._call("GET", f"/git/ref/heads/{_q(self.base)}")
         status, body = self.gh.request(
             "POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": data["object"]["sha"]})
@@ -164,20 +188,22 @@ class Proposer:
             raise ProposalError(f"cannot open PR: {status} {(data or {}).get('message', '')}")
         return pr, False
 
-    def propose_note(self, topic: str, title: str, body: str, parent: str | None = None,
-                     sources: list[str] | None = None) -> dict:
+    def propose_note(self, topic: str, title: str, body: str, parent=None, links=None, aliases=None) -> dict:
         """Create a new note. It is agent memory by definition, so it carries the agent tag."""
-        sources = sources or []
-        slug = self._validate(topic, title, body, parent, sources)
+        slug = self._validate(topic, title, body)
+        parents, link_names, alias_list = (
+            self._names(parent, "parent"), self._names(links, "links"), self._names(aliases, "aliases"))
         path = f"{self.folder}/{title}.md"
         if self.exists(title) or self._file_exists(path, self.base):
             raise ProposalError(f"a note named '{title}' already exists; propose a different title")
         branch, pr = self._join_topic(slug)
         if self._file_exists(path, branch):
             raise ProposalError(f"'{title}' is already proposed in topic '{slug}'")
+        self._guard(branch)
         self._call("PUT", f"/contents/{_q(path)}", {
             "message": f"knowledge: add {title}",
-            "content": base64.b64encode(self._render(title, body, parent, sources).encode()).decode(),
+            "content": base64.b64encode(
+                self._render(title, body, parents, link_names, alias_list).encode()).decode(),
             "branch": branch,
         })
         pr, new_pr = self._ensure_pr(topic, branch, pr)
@@ -213,6 +239,7 @@ class Proposer:
         front = re.sub(r"(?m)^updated:.*$", f"updated: {today}", front, count=1)
         whose = AGENT_TAG if re.search(rf"(?m)^\s*-\s*{re.escape(AGENT_TAG)}\s*$", front) else "owner's note"
         title = path.rsplit("/", 1)[-1][:-3]
+        self._guard(branch)
         self._call("PUT", f"/contents/{_q(path)}", {
             "message": f"knowledge: edit {title} ({whose})" + (f"\n\n{reason}" if reason else ""),
             "content": base64.b64encode((front + body.strip() + "\n").encode()).decode(),
@@ -234,6 +261,7 @@ class Proposer:
         orphans = {r["ref"][len("refs/heads/"):] for r in refs} - open_heads
         deleted = []
         for branch in orphans & self._orphans:
+            self._guard(branch)
             status, _ = self.gh.request("DELETE", f"/git/refs/heads/{_q(branch)}")
             if status in (204, 404, 422):
                 deleted.append(branch)

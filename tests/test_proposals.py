@@ -1,4 +1,5 @@
 import base64
+import datetime
 import hashlib
 import re
 import unittest
@@ -49,6 +50,7 @@ class FakeGitHub:
                 current = self._text(body["branch"], file)
                 if current is None or hashlib.sha1(current.encode()).hexdigest() != body["sha"]:
                     return 409, {"message": "sha mismatch"}
+            assert body["branch"] != "master" and body["branch"].startswith("knowledge/"), body["branch"]
             self.files[(body["branch"], file)] = base64.b64decode(body["content"]).decode()
             self.commits.append(body["message"])
             return 201, {}
@@ -93,14 +95,34 @@ class ProposalTests(unittest.TestCase):
         self.assertTrue(slugify("Проверка Knowledge MCP").isascii())
 
     def test_first_proposal_opens_branch_and_pr(self):
-        r = self.p.propose_note("Traefik", "Traefik", "Reverse proxy.", parent="Инфраструктура",
-                                sources=["claude memory 2026-11-18"])
+        r = self.p.propose_note("Traefik", "Traefik", "Reverse proxy.", parent="Инфраструктура")
         self.assertEqual((r["branch"], r["new_pr"]), ("knowledge/traefik", True))
-        text = self.gh.files[("knowledge/traefik", "01 Архив/Traefik.md")]
-        self.assertIn('parent: "[[Инфраструктура]]"', text)
-        self.assertIn('  - "claude memory 2026-11-18"', text)
-        self.assertIn("tags:\n  - agent-memory\n", text)  # a created note is agent memory
         self.assertEqual(len(self.gh.prs), 1)
+
+    def test_note_follows_the_owner_template(self):
+        self.p.propose_note("t", "Сервис", "Первая строка.", parent=["code-kvt", "[[Сеть]]"],
+                            links=["Traefik"], aliases=["svc"])
+        text = self.gh.files[("knowledge/t", "01 Архив/Сервис.md")]
+        today = datetime.date.today().isoformat()
+        self.assertEqual(text, (
+            f"---\ncreated: {today}\nupdated: {today}\naliases:\n  - \"svc\"\n"
+            'parent:\n  - "[[code-kvt]]"\n  - "[[Сеть]]"\nlinks:\n  - "[[Traefik]]"\n'
+            "tags:\n  - agent-memory\n---\n# Сервис\n\nПервая строка.\n"))
+
+    def test_empty_fields_stay_in_template_order_and_own_heading_is_kept(self):
+        self.p.propose_note("t", "Пусто", "# Свой заголовок\n\nТекст.")
+        text = self.gh.files[("knowledge/t", "01 Архив/Пусто.md")]
+        keys = re.findall(r"(?m)^([a-z]+):", text.split("---")[1])
+        self.assertEqual(keys, ["created", "updated", "aliases", "parent", "links", "tags"])
+        self.assertIn("aliases:\nparent:\nlinks:\ntags:", text)
+        self.assertTrue(text.endswith("---\n# Свой заголовок\n\nТекст.\n"))
+        self.assertNotIn("# Пусто", text)
+
+    def test_writes_never_touch_master_or_foreign_branches(self):
+        for bad in ("master", "feature/x", "knowledge/", "knowledge"):
+            with self.assertRaises(ProposalError):
+                self.p._guard(bad)
+        self.p._guard("knowledge/anything")
 
     def test_edit_keeps_owner_note_tags_and_bumps_updated(self):
         r = self.p.propose_edit("fixes", "01 Архив/Existing.md", "New body.", reason="stale")
@@ -162,7 +184,8 @@ class ProposalTests(unittest.TestCase):
             {"topic": "t", "title": "a/b", "body": "x"},                 # bad title
             {"topic": "t", "title": "A", "body": "  "},                  # empty body
             {"topic": "t", "title": "A", "body": "password: hunter2hunter2"},  # credential
-            {"topic": "t", "title": "A", "body": "x", "parent": "[[A]]"},   # bracketed parent
+            {"topic": "t", "title": "A", "body": "x", "parent": "a|b"},   # not a plain note name
+            {"topic": "t", "title": "code-kvt: инфраструктура", "body": "x"},  # a colon is not allowed in a name
         ]
         for kw in bad:
             with self.assertRaises(ProposalError, msg=str(kw)):
