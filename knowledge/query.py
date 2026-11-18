@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
 
+from . import embeddings
 from .index import HEADING, parent_cycles
 
 
@@ -28,45 +30,147 @@ _MEMORY_FILTER = {
 }
 
 
-def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "all") -> dict:
-    """BM25 over title, aliases and body. Terms are quoted, so hostnames and IPs match literally.
+MODES = ("hybrid", "keyword", "semantic")
+RRF_K = 60  # reciprocal rank fusion constant: larger flattens the gap between ranks
+# e5-small cosines are compressed: on the real vault right notes sit at 0.83-0.88 and wrong ones at 0.80-0.90.
+# 0.86 maximised hybrid MRR on 20 hand-labelled queries and let no off-topic query through; re-measure after
+# changing the model or the chunking.
+SEMANTIC_MIN = float(os.environ.get("KNOWLEDGE_SEMANTIC_MIN", "0.86"))
+CANDIDATES = 50  # chunks taken from each ranker before fusion
 
-    `memory` narrows by who keeps the note: "agent" (tagged agent-memory), "owner" (the rest), "all".
+_HIT_COLUMNS = "f.note_id, f.heading, substr(f.body, 1, 240) AS head, n.hash, n.indexed_at, n.title, n.tags"
+
+
+# The hub and everything under it through parent links, at any depth. UNION keeps parent cycles finite.
+_SUBTREE = ("WITH RECURSIVE d(id) AS (SELECT ? UNION SELECT e.src FROM edges e JOIN d ON e.dst_id = d.id "
+            "WHERE e.kind = 'CHILD_OF') SELECT id FROM d")
+
+
+def _find_hub(con: sqlite3.Connection, name: str) -> str | None:
+    """A note by vault path, title or alias (case-insensitive); None when nothing or several match."""
+    name = name.strip().removeprefix("[[").removesuffix("]]")
+    for sql in ("SELECT id FROM notes WHERE id = ?", "SELECT id FROM notes WHERE lower(title) = lower(?)",
+                "SELECT id FROM notes WHERE lower(aliases) LIKE '%' || lower(json_quote(?)) || '%'"):
+        found = [r[0] for r in con.execute(sql, (name,))]
+        if len(found) == 1:
+            return found[0]
+    return None
+
+
+def _scope(memory: str, hub: str | None) -> tuple[str, list]:
+    """SQL fragment (on alias n) and its parameters for the memory and parent filters."""
+    sql, params = _MEMORY_FILTER[memory], []
+    if hub:
+        sql += f" AND n.id IN ({_SUBTREE})"
+        params.append(hub)
+    return sql, params
+
+
+def _keyword_hits(con: sqlite3.Connection, terms: list[str], scope: tuple[str, list]) -> list[sqlite3.Row]:
+    for op in ("AND", "OR"):  # fall back to OR only when the strict query finds nothing
+        rows = con.execute(
+            f"SELECT f.rowid AS chunk, snippet(fts, 4, '[', ']', '…', 24) AS snip, {_HIT_COLUMNS}, "
+            "bm25(fts, 0, 0, 5.0, 3.0, 1.0) AS score "
+            "FROM fts f JOIN notes n ON n.id = f.note_id "
+            "WHERE fts MATCH ?" + scope[0] + " ORDER BY score LIMIT ?",
+            (_match(terms, op), *scope[1], CANDIDATES),
+        ).fetchall()
+        if rows:
+            return rows
+    return []
+
+
+def _semantic_hits(con: sqlite3.Connection, query: str, scope: tuple[str, list],
+                   embedder) -> list[tuple[int, str, float]]:
+    allowed = None
+    if scope[0]:
+        allowed = {r[0] for r in con.execute("SELECT n.id FROM notes n WHERE 1=1" + scope[0], scope[1])}
+    vector = embedder.embed_query(query)
+    return [h for h in embeddings.nearest(con, vector, CANDIDATES, allowed) if h[2] >= SEMANTIC_MIN]
+
+
+def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "all",
+           mode: str = "hybrid", embedder=None, parent: str | None = None) -> dict:
+    """Find notes by words (BM25), by meaning (e5 vectors) or both fused by rank.
+
+    Keyword terms are quoted, so hostnames and IPs match literally. `memory` narrows by who keeps the note:
+    "agent" (tagged agent-memory), "owner" (the rest), "all". Without an embedder, or when it fails, the
+    answer is keyword-only and carries `"semantic": "unavailable"`. `parent` (a note's title, alias or path)
+    keeps only that note and everything under it through parent links, at any depth: one project's notes.
     """
     if memory not in _MEMORY_FILTER:
         return {"error": f"memory must be one of {sorted(_MEMORY_FILTER)}"}
+    if mode not in MODES:
+        return {"error": f"mode must be one of {list(MODES)}"}
     terms = re.findall(r"\S+", query)
     if not terms:
         return {"results": []}
-    rows = []
-    for op in ("AND", "OR"):  # fall back to OR only when the strict query finds nothing
-        rows = con.execute(
-            "SELECT f.note_id, f.heading, snippet(fts, 4, '[', ']', '…', 24) AS snip, "
-            "substr(f.body, 1, 240) AS head, "
-            "bm25(fts, 0, 0, 5.0, 3.0, 1.0) AS rank, n.hash, n.indexed_at, n.title, n.tags "
-            "FROM fts f JOIN notes n ON n.id = f.note_id "
-            "WHERE fts MATCH ?" + _MEMORY_FILTER[memory] + " ORDER BY rank LIMIT ?",
-            (_match(terms, op), limit * 3),
-        ).fetchall()
-        if rows:
-            break
-    results, seen = [], set()
-    for r in rows:  # one hit per note: the best chunk
-        if r["note_id"] in seen:
-            continue
-        seen.add(r["note_id"])
+    hub = None
+    if parent:
+        hub = _find_hub(con, parent)
+        if hub is None:
+            return {"error": f"parent {parent!r} is not a single known note (use its title, alias or path)"}
+    scope = _scope(memory, hub)
+    extra: dict = {}
+    keyword = _keyword_hits(con, terms, scope) if mode != "semantic" else []
+    semantic: list[tuple[int, str, float]] = []
+    if mode != "keyword":
+        try:
+            if embedder is None:
+                raise RuntimeError("no embedder")
+            semantic = _semantic_hits(con, query, scope, embedder)
+        except Exception:  # noqa: BLE001 - a broken model must not take keyword search down with it
+            extra["semantic"] = "unavailable"
+            if mode == "semantic":
+                return {"results": [], **extra}
+            keyword = keyword or _keyword_hits(con, terms, scope)
+
+    # Rank notes, not chunks: a note's place in a list is where its best chunk stands.
+    fused: dict[str, dict] = {}
+    for position, r in enumerate(keyword):
+        entry = fused.setdefault(r["note_id"], {"score": 0.0, "bm25": None, "similarity": None, "row": r})
+        if entry["bm25"] is None:
+            entry["score"] += 1 / (RRF_K + position + 1)
+            entry["bm25"] = round(r["score"], 3)
+    for position, (chunk, note_id, similarity) in enumerate(semantic):
+        entry = fused.setdefault(note_id, {"score": 0.0, "bm25": None, "similarity": None, "row": None})
+        if entry["similarity"] is None:
+            entry["score"] += 1 / (RRF_K + position + 1)
+            entry["similarity"] = round(similarity, 3)
+            entry["chunk"] = chunk
+    results = []
+    for note_id, e in sorted(fused.items(), key=lambda kv: -kv[1]["score"])[:limit]:
+        r = e["row"]
+        if r is None:  # found by meaning only: take the chunk that matched
+            r = con.execute(f"SELECT {_HIT_COLUMNS}, '' AS snip FROM fts f JOIN notes n ON n.id = f.note_id "
+                            "WHERE f.rowid = ?", (e["chunk"],)).fetchone()
         # A title-only match leaves the body without a highlight: show where the text starts instead.
         snippet = r["snip"] if "[" in r["snip"] else " ".join(r["head"].split())
         tags = json.loads(r["tags"])
         results.append({
-            "path": r["note_id"], "title": r["title"], "heading": r["heading"], "snippet": snippet,
+            "path": note_id, "title": r["title"], "heading": r["heading"], "snippet": snippet,
             "tags": tags, "agent_memory": AGENT_TAG in tags,
-            "rank": len(results) + 1,  # 1 is the best; bm25 is the raw score, lower is better
-            "bm25": round(r["rank"], 3), "source_hash": r["hash"], "indexed_at": r["indexed_at"],
+            "rank": len(results) + 1,  # 1 is the best; bm25 (lower is better) and similarity are raw scores
+            "reason": "both" if e["bm25"] is not None and e["similarity"] is not None
+            else "keyword" if e["bm25"] is not None else "semantic",
+            "bm25": e["bm25"], "similarity": e["similarity"],
+            "source_hash": r["hash"], "indexed_at": r["indexed_at"],
         })
-        if len(results) == limit:
-            break
-    return {"results": results}
+    return {"results": results, **extra}
+
+
+# Unrelated notes reach 0.90 here, so only near-copies count as duplicates. TODO: not validated on real duplicates.
+SIMILAR_MIN = float(os.environ.get("KNOWLEDGE_SIMILAR_MIN", "0.92"))
+
+
+def similar(con: sqlite3.Connection, text: str, embedder, limit: int = 3) -> list[dict]:
+    """Existing notes close in meaning to `text`, best first: a duplicate check before a new note."""
+    best: dict[str, float] = {}
+    for _, note_id, similarity in embeddings.nearest(con, embedder.embed_query(text), CANDIDATES):
+        if similarity >= SIMILAR_MIN and note_id not in best:
+            best[note_id] = round(similarity, 3)
+    titles = dict(con.execute("SELECT id, title FROM notes"))
+    return [{"path": p, "title": titles[p], "similarity": s} for p, s in list(best.items())[:limit]]
 
 
 def related(con: sqlite3.Connection, path: str) -> dict:

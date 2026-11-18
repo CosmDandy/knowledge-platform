@@ -5,6 +5,9 @@ requires-python = ">=3.12"
 dependencies = [
     # NOTE: the major is explicit because 2.x renamed FastMCP to MCPServer.
     "mcp>=2",
+    # ONNX runtime embeddings without torch; add_custom_model (used for multilingual-e5-small) needs 0.7+.
+    "fastembed>=0.7",
+    "numpy>=2",
 ]
 
 [project.scripts]

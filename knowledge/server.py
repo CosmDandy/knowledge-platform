@@ -13,7 +13,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-from . import index, query
+from . import embeddings, index, query
 from .proposals import GitHub, ProposalError, Proposer
 
 VAULT = os.environ.get("KNOWLEDGE_VAULT", "/vault")
@@ -23,6 +23,9 @@ INCLUDE = [p.strip() for p in os.environ.get("KNOWLEDGE_INCLUDE", "01 Архив
 INTERVAL = int(os.environ.get("KNOWLEDGE_SYNC_INTERVAL", "300"))
 
 mcp = MCPServer("knowledge")
+# Semantic search is optional: KNOWLEDGE_SEMANTIC=off keeps the server keyword-only and never loads the model.
+embedder = (None if os.environ.get("KNOWLEDGE_SEMANTIC", "on") == "off"
+            else embeddings.Embedder(os.environ.get("KNOWLEDGE_MODEL_DIR")))
 
 
 def _title_exists(title: str) -> bool:
@@ -66,13 +69,18 @@ def _ro(fn, *args):
 
 
 @mcp.tool()
-def search(text: str, limit: int = 10, memory: str = "all") -> str:
-    """Full-text (BM25) search over notes. Exact hostnames, IPs and versions match literally.
+def search(text: str, limit: int = 10, memory: str = "all", mode: str = "hybrid",
+           parent: str | None = None) -> str:
+    """Search notes by words, by meaning, or both.
 
-    Each hit says whether it is agent memory (tag agent-memory) or the owner's own note.
-    memory: "all" (default), "agent" (only agent memory) or "owner" (only the owner's notes).
+    mode: "hybrid" (default: BM25 and semantic vectors fused by rank), "keyword" (exact words only:
+    hostnames, IPs and versions match literally) or "semantic" (meaning only, finds notes that share
+    no words with the query). Each hit says why it matched (`reason`) and whether it is agent memory
+    (tag agent-memory) or the owner's own note. memory: "all" (default), "agent" or "owner".
+    parent: a project hub note (title, alias or path, for example "code-kvt"); searches only that
+    note and everything under it through parent links, at any depth.
     """
-    return _ro(query.search, text, min(limit, 50), memory)
+    return _ro(query.search, text, min(limit, 50), memory, mode, embedder, parent)
 
 
 @mcp.tool()
@@ -108,9 +116,19 @@ def propose_note(topic: str, title: str, body: str, parent: str | list[str] | No
     if proposer is None:
         return _WRITE_OFF
     try:
-        return _j(proposer.propose_note(topic, title, body, parent, links, aliases))
+        result = proposer.propose_note(topic, title, body, parent, links, aliases)
     except ProposalError as e:
         return _j({"error": str(e)})
+    if embedder:
+        try:  # advisory only: the proposal is already made, a failed check must not hide it
+            con = query.open_ro(DB)
+            try:
+                result["similar_existing"] = query.similar(con, f"{title}\n{body}", embedder)
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001
+            print(f"similar check failed: {type(e).__name__}", file=sys.stderr, flush=True)
+    return _j(result)
 
 
 @mcp.tool()
@@ -143,13 +161,16 @@ def list_proposals() -> str:
 
 def _maintenance() -> None:
     """Reindex and delete finished topic branches. Logs never contain note text."""
-    while True:
-        time.sleep(INTERVAL)
+    while True:  # the first pass runs at once: it loads the model and embeds what the quick startup sync left
         # A broad except is deliberate: a failed tick must not kill the thread, the next one retries.
         try:
-            index.sync(VAULT, DB, include=INCLUDE)
+            started = time.monotonic()
+            result = index.sync(VAULT, DB, include=INCLUDE, embedder=embedder)
+            if result["embedded"]:
+                print(f"embedded {result['embedded']} chunks in {time.monotonic() - started:.0f}s",
+                      file=sys.stderr, flush=True)
         except Exception as e:  # noqa: BLE001
-            print(f"sync failed: {type(e).__name__}", file=sys.stderr, flush=True)
+            print(f"sync failed: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr, flush=True)
         if proposer:
             try:
                 deleted = proposer.cleanup()
@@ -157,6 +178,7 @@ def _maintenance() -> None:
                     print(f"deleted branches: {deleted}", file=sys.stderr, flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"cleanup failed: {type(e).__name__}", file=sys.stderr, flush=True)
+        time.sleep(INTERVAL)
 
 
 def main() -> None:
@@ -169,9 +191,10 @@ def main_http() -> None:
     import uvicorn
     from mcp.server.transport_security import TransportSecuritySettings
 
-    result = index.sync(VAULT, DB, include=INCLUDE)
+    result = index.sync(VAULT, DB, include=INCLUDE)  # words first: search works while vectors are still computed
     print(f"indexed {result['total']} notes from {INCLUDE or 'whole vault'}; "
-          f"writing {'enabled' if proposer else 'disabled'}", file=sys.stderr, flush=True)
+          f"writing {'enabled' if proposer else 'disabled'}; semantic {'on' if embedder else 'off'}",
+          file=sys.stderr, flush=True)
     threading.Thread(target=_maintenance, daemon=True).start()
     host = os.environ.get("KNOWLEDGE_HOST", "127.0.0.1")
     # NOTE: no auth by design; the container port is published on the tailnet address only.

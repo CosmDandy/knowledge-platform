@@ -7,7 +7,8 @@ Notes written into the vault are in Russian.
 ## Layout
 
 - `knowledge/index.py` parser, chunks, SQLite FTS5 + link graph, incremental `sync`, `FORMAT` version.
-- `knowledge/query.py` read-only queries (`search`, `read`, `related`, `status`).
+- `knowledge/embeddings.py` e5-small vectors (fastembed/ONNX) stored as BLOBs in the index, numpy brute force; model baked into the image.
+- `knowledge/query.py` read-only queries (`search` = BM25 + vectors fused by RRF, `read`, `related`, `status`).
 - `knowledge/proposals.py` the only write path: topic branch + one PR per topic through the GitHub REST API.
 - `knowledge/server.py` MCP over streamable HTTP; background reindex and branch cleanup.
 - `tests/` unittest; `Dockerfile`, `compose.yaml`; `secrets.sops.yaml` (encrypted, never decrypt into a file).

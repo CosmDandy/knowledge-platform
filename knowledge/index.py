@@ -12,6 +12,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from . import embeddings
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
   id TEXT PRIMARY KEY,            -- vault-relative path; a rename is delete + add
@@ -39,7 +41,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
 """
 
 # Bump when what is stored per note changes: the next sync then rebuilds the index from the files.
-FORMAT = 3
+FORMAT = 4
 SKIP_DIRS = {"node_modules"}
 WIKILINK = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -54,6 +56,7 @@ SENTENCE_DOT = re.compile(r"(?<=\S)\.(?=\s|$)", re.MULTILINE)
 def connect(db_path: str | Path) -> sqlite3.Connection:
     con = sqlite3.connect(str(db_path))
     con.executescript(SCHEMA)
+    embeddings.ensure_schema(con)
     return con
 
 
@@ -174,6 +177,7 @@ def _index_note(con: sqlite3.Connection, root: Path, path: Path, st, digest: str
     title = path.stem
     tags, aliases = as_list(fm.get("tags")), as_list(fm.get("aliases"))
     con.execute("DELETE FROM fts WHERE note_id = ?", (rel,))
+    embeddings.drop_note(con, rel)
     con.execute("DELETE FROM edges WHERE src = ?", (rel,))
     con.execute(
         "INSERT OR REPLACE INTO notes VALUES (?,?,?,?,?,?,?,?)",
@@ -212,14 +216,22 @@ def resolve_edges(con: sqlite3.Connection) -> None:
                      for rid, n in rows])
 
 
-def sync(root: str | Path, db_path: str | Path, full: bool = False, include: list[str] | None = None) -> dict:
-    """Bring the index in line with the vault. Cheap on no-op: stat only, hash on mtime change."""
+def sync(root: str | Path, db_path: str | Path, full: bool = False, include: list[str] | None = None,
+         embedder: embeddings.Embedder | None = None) -> dict:
+    """Bring the index in line with the vault. Cheap on no-op: stat only, hash on mtime change.
+
+    With an embedder, chunks without a vector are embedded at the end (identical text comes from the cache).
+    """
     root = Path(root).resolve()
     con = connect(db_path)
     stored = con.execute("SELECT v FROM state WHERE k='format'").fetchone()
     full = full or stored is None or stored[0] != str(FORMAT)  # an old index layout is rebuilt, not patched
     if full:
-        con.executescript("DELETE FROM notes; DELETE FROM edges; DELETE FROM fts;")
+        con.executescript("DELETE FROM notes; DELETE FROM edges; DELETE FROM fts; DELETE FROM vec;")
+    if embedder:
+        model = con.execute("SELECT v FROM state WHERE k='embed_model'").fetchone()
+        if model is None or model[0] != embedder.model_name:  # vectors of another model are not comparable
+            con.execute("DELETE FROM vec")
     known = {r[0]: (r[1], r[2], r[3]) for r in con.execute("SELECT id,mtime_ns,size,hash FROM notes")}
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     added = changed = 0
@@ -243,13 +255,19 @@ def sync(root: str | Path, db_path: str | Path, full: bool = False, include: lis
         con.execute("DELETE FROM notes WHERE id=?", (rel,))
         con.execute("DELETE FROM edges WHERE src=?", (rel,))
         con.execute("DELETE FROM fts WHERE note_id=?", (rel,))
+        embeddings.drop_note(con, rel)
     resolve_edges(con)
+    embedded = 0
+    if embedder:
+        embedded = embeddings.fill(con, embedder)
+        con.execute("INSERT OR REPLACE INTO state VALUES ('embed_model', ?)", (embedder.model_name,))
     con.execute("INSERT OR REPLACE INTO state VALUES ('format', ?)", (str(FORMAT),))
     con.execute("INSERT OR REPLACE INTO state VALUES ('root', ?)", (str(root),))
     con.execute("INSERT OR REPLACE INTO state VALUES ('last_sync', ?)", (now,))
     con.commit()
     con.close()
-    return {"added": added, "changed": changed, "removed": len(gone), "total": len(on_disk)}
+    return {"added": added, "changed": changed, "removed": len(gone), "total": len(on_disk),
+            "embedded": embedded}
 
 
 def parent_cycles(con: sqlite3.Connection) -> list[list[str]]:

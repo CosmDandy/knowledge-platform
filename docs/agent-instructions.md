@@ -9,7 +9,8 @@ This is your memory for facts about infrastructure, projects and decisions. Use 
 of the local auto-memory files.
 
 - Before answering or changing anything non-trivial, `search` (exact names work best:
-  hostnames, services, versions), then `read` the best hits. A hit with `agent_memory: true`
+  hostnames, services, versions; a question in plain words also works, it matches by meaning;
+  `parent="<project hub>"` limits it to one project), then `read` the best hits. A hit with `agent_memory: true`
   is your own memory; the rest are the owner's notes: trust them, do not rewrite them
   without a reason.
 - Write only what you verified, and say in the text how and when you checked it. Never write
