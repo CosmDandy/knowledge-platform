@@ -21,6 +21,8 @@ services:
       KNOWLEDGE_INCLUDE: "${KNOWLEDGE_INCLUDE-01 Архив}"
       # on = hybrid BM25 + vectors (needs the image built with KNOWLEDGE_SEMANTIC_BUILD=1, ~800 MB of RAM).
       KNOWLEDGE_SEMANTIC: "${KNOWLEDGE_SEMANTIC:-off}"
+      # Rollback path if clients lose access: KNOWLEDGE_AUTH=off docker compose up -d (the port stays tailnet-only).
+      KNOWLEDGE_AUTH: "${KNOWLEDGE_AUTH:-on}"
       KNOWLEDGE_GITHUB_REPO: "${KNOWLEDGE_GITHUB_REPO:-CosmDandy/knowledge}"
       # Empty keeps the write tools off. Supply it from sops: sops exec-env secrets.sops.yaml 'docker compose up -d'
       KNOWLEDGE_GITHUB_TOKEN: "${KNOWLEDGE_GITHUB_TOKEN:-}"
