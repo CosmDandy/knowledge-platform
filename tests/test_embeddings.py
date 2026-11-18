@@ -90,7 +90,12 @@ class Semantic(unittest.TestCase):
         res = query.search(self.con, "restic", embedder=Broken())
         self.assertEqual(res["semantic"], "unavailable")
         self.assertEqual([h["path"] for h in res["results"]], ["A/Backup.md"])
-        self.assertEqual(query.search(self.con, "restic")["semantic"], "unavailable")  # no embedder at all
+
+    def test_semantic_off_is_plain_keyword_search(self):
+        res = query.search(self.con, "restic")  # no embedder: the default server setup
+        self.assertNotIn("semantic", res)
+        self.assertEqual([(h["path"], h["reason"]) for h in res["results"]], [("A/Backup.md", "keyword")])
+        self.assertIn("error", query.search(self.con, "бэкапы", mode="semantic"))
 
     def test_bad_mode(self):
         self.assertIn("error", query.search(self.con, "x", mode="magic"))

@@ -94,14 +94,19 @@ def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "
     """Find notes by words (BM25), by meaning (e5 vectors) or both fused by rank.
 
     Keyword terms are quoted, so hostnames and IPs match literally. `memory` narrows by who keeps the note:
-    "agent" (tagged agent-memory), "owner" (the rest), "all". Without an embedder, or when it fails, the
-    answer is keyword-only and carries `"semantic": "unavailable"`. `parent` (a note's title, alias or path)
+    "agent" (tagged agent-memory), "owner" (the rest), "all". Without an embedder (semantic search is off) hybrid
+    is plain keyword search and mode "semantic" is an error; when the embedder fails, the answer is keyword-only
+    and carries `"semantic": "unavailable"`. `parent` (a note's title, alias or path)
     keeps only that note and everything under it through parent links, at any depth: one project's notes.
     """
     if memory not in _MEMORY_FILTER:
         return {"error": f"memory must be one of {sorted(_MEMORY_FILTER)}"}
     if mode not in MODES:
         return {"error": f"mode must be one of {list(MODES)}"}
+    if embedder is None:
+        if mode == "semantic":
+            return {"error": "semantic search is off on this server (KNOWLEDGE_SEMANTIC=on enables it)"}
+        mode = "keyword"
     terms = re.findall(r"\S+", query)
     if not terms:
         return {"results": []}
@@ -116,8 +121,6 @@ def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "
     semantic: list[tuple[int, str, float]] = []
     if mode != "keyword":
         try:
-            if embedder is None:
-                raise RuntimeError("no embedder")
             semantic = _semantic_hits(con, query, scope, embedder)
         except Exception:  # noqa: BLE001 - a broken model must not take keyword search down with it
             extra["semantic"] = "unavailable"

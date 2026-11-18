@@ -23,9 +23,10 @@ INCLUDE = [p.strip() for p in os.environ.get("KNOWLEDGE_INCLUDE", "01 Архив
 INTERVAL = int(os.environ.get("KNOWLEDGE_SYNC_INTERVAL", "300"))
 
 mcp = MCPServer("knowledge")
-# Semantic search is optional: KNOWLEDGE_SEMANTIC=off keeps the server keyword-only and never loads the model.
-embedder = (None if os.environ.get("KNOWLEDGE_SEMANTIC", "on") == "off"
-            else embeddings.Embedder(os.environ.get("KNOWLEDGE_MODEL_DIR")))
+# Semantic search is opt-in: KNOWLEDGE_SEMANTIC=on loads the model (about 800 MB of RAM); otherwise the
+# server is keyword-only and never touches it.
+embedder = (embeddings.Embedder(os.environ.get("KNOWLEDGE_MODEL_DIR"))
+            if os.environ.get("KNOWLEDGE_SEMANTIC", "off") == "on" else None)
 
 
 def _title_exists(title: str) -> bool:
@@ -75,7 +76,8 @@ def search(text: str, limit: int = 10, memory: str = "all", mode: str = "hybrid"
 
     mode: "hybrid" (default: BM25 and semantic vectors fused by rank), "keyword" (exact words only:
     hostnames, IPs and versions match literally) or "semantic" (meaning only, finds notes that share
-    no words with the query). Each hit says why it matched (`reason`) and whether it is agent memory
+    no words with the query). Semantic search is off unless the server enables it; then hybrid
+    behaves as keyword and "semantic" returns an error. Each hit says why it matched (`reason`) and whether it is agent memory
     (tag agent-memory) or the owner's own note. memory: "all" (default), "agent" or "owner".
     parent: a project hub note (title, alias or path, for example "code-kvt"); searches only that
     note and everything under it through parent links, at any depth.

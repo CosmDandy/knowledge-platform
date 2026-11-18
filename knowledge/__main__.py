@@ -16,8 +16,8 @@ def main() -> None:
     a = p.parse_args()
     if a.cmd in ("sync", "rebuild"):
         from . import embeddings
-        embedder = None if os.environ.get("KNOWLEDGE_SEMANTIC", "on") == "off" else embeddings.Embedder(
-            os.environ.get("KNOWLEDGE_MODEL_DIR"))
+        embedder = embeddings.Embedder(os.environ.get("KNOWLEDGE_MODEL_DIR")) if os.environ.get(
+            "KNOWLEDGE_SEMANTIC", "off") == "on" else None
         out = index.sync(a.vault, a.db, full=a.cmd == "rebuild", include=a.include, embedder=embedder)
     else:
         con = query.open_ro(a.db)

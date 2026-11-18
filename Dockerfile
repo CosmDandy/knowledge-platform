@@ -5,12 +5,15 @@ WORKDIR /app
 # Heavy, rarely changing layers first: dependencies, then the embedding model, then the code.
 RUN pip install --no-cache-dir "mcp>=2" "fastembed>=0.7" "numpy>=2"
 
-# The model is baked into the image: the container's root is read-only and needs no network at runtime.
+# Semantic search is off by default. With --build-arg EMBED_MODEL=1 the model is baked into the image
+# (the container's root is read-only and needs no network at runtime); enable it with KNOWLEDGE_SEMANTIC=on.
 # embeddings.py alone is copied so editing other code does not download the model again.
+ARG EMBED_MODEL=0
 ENV KNOWLEDGE_MODEL_DIR=/opt/models
 COPY knowledge/embeddings.py /build/embeddings.py
-RUN cd /build && python -c "import embeddings; embeddings.Embedder('/opt/models').embed(['warm up'])" \
-    && chmod -R a+rX /opt/models && rm -rf /build
+RUN if [ "$EMBED_MODEL" = "1" ]; then \
+      cd /build && python -c "import embeddings; embeddings.Embedder('/opt/models').embed(['warm up'])" \
+      && chmod -R a+rX /opt/models; fi; rm -rf /build
 
 COPY pyproject.toml ./
 COPY knowledge ./knowledge

@@ -2,7 +2,10 @@ name: knowledge-platform
 
 services:
   knowledge:
-    build: .
+    build:
+      context: .
+      args:
+        EMBED_MODEL: "${KNOWLEDGE_SEMANTIC_BUILD:-0}"  # 1 bakes the e5-small model into the image
     image: knowledge-platform:latest
     container_name: knowledge-mcp
     restart: unless-stopped
@@ -16,6 +19,8 @@ services:
       - knowledge-data:/data
     environment:
       KNOWLEDGE_INCLUDE: "${KNOWLEDGE_INCLUDE-01 Архив}"
+      # on = hybrid BM25 + vectors (needs the image built with KNOWLEDGE_SEMANTIC_BUILD=1, ~800 MB of RAM).
+      KNOWLEDGE_SEMANTIC: "${KNOWLEDGE_SEMANTIC:-off}"
       KNOWLEDGE_GITHUB_REPO: "${KNOWLEDGE_GITHUB_REPO:-CosmDandy/knowledge}"
       # Empty keeps the write tools off. Supply it from sops: sops exec-env secrets.sops.yaml 'docker compose up -d'
       KNOWLEDGE_GITHUB_TOKEN: "${KNOWLEDGE_GITHUB_TOKEN:-}"
