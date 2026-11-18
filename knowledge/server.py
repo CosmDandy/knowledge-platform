@@ -22,7 +22,14 @@ DB = os.environ.get("KNOWLEDGE_DB", "/data/knowledge.db")
 INCLUDE = [p.strip() for p in os.environ.get("KNOWLEDGE_INCLUDE", "01 Архив").split(",") if p.strip()]
 INTERVAL = int(os.environ.get("KNOWLEDGE_SYNC_INTERVAL", "300"))
 
-mcp = MCPServer("knowledge")
+# Shown to the client's model whenever the server is connected: what this is and how to use it.
+INSTRUCTIONS = """\
+BLUF: Main memory layer. Search it before guessing.
+CONTENT: Owner's notes and agent memory (agent_memory: true) on projects: hosts, services, people, decisions, reasons.
+FIND: search (parent="<project hub>" = one project). read = full note. related = parents, children, links.
+ADD: propose_note = new, propose_edit = correction. Each opens a PR; invisible to search until merged."""
+
+mcp = MCPServer("knowledge", instructions=INSTRUCTIONS)
 # Semantic search is opt-in: KNOWLEDGE_SEMANTIC=on loads the model (about 800 MB of RAM); otherwise the
 # server is keyword-only and never touches it.
 embedder = (embeddings.Embedder(os.environ.get("KNOWLEDGE_MODEL_DIR"))
@@ -70,19 +77,15 @@ def _ro(fn, *args):
 
 
 @mcp.tool()
-def search(text: str, limit: int = 10, memory: str = "all", mode: str = "hybrid",
-           parent: str | None = None) -> str:
-    """Search notes by words, by meaning, or both.
+def search(text: str, limit: int = 10, memory: str = "all", parent: str | None = None) -> str:
+    """Find notes by words (BM25). Exact names, hostnames and IPs match literally.
 
-    mode: "hybrid" (default: BM25 and semantic vectors fused by rank), "keyword" (exact words only:
-    hostnames, IPs and versions match literally) or "semantic" (meaning only, finds notes that share
-    no words with the query). Semantic search is off unless the server enables it; then hybrid
-    behaves as keyword and "semantic" returns an error. Each hit says why it matched (`reason`) and whether it is agent memory
-    (tag agent-memory) or the owner's own note. memory: "all" (default), "agent" or "owner".
-    parent: a project hub note (title, alias or path, for example "code-kvt"); searches only that
-    note and everything under it through parent links, at any depth.
+    text: the query. limit: 1-50 (default 10).
+    memory: "all" (default), "agent" (only agent notes) or "owner" (only the owner's).
+    parent: a project hub note (title, alias or path); searches it and everything under it.
+    Each hit has path, title, heading, snippet, agent_memory.
     """
-    return _ro(query.search, text, min(limit, 50), memory, mode, embedder, parent)
+    return _ro(query.search, text, min(limit, 50), memory, "hybrid", embedder, parent)
 
 
 @mcp.tool()
@@ -106,14 +109,11 @@ def status() -> str:
 @mcp.tool()
 def propose_note(topic: str, title: str, body: str, parent: str | list[str] | None = None,
                  links: list[str] | None = None, aliases: list[str] | None = None) -> str:
-    """Propose a NEW note. It lands in a pull request, never directly in the vault.
+    """Propose a NEW note (opens or extends a pull request). Send the body without frontmatter;
+    never put credentials in it.
 
-    The note is created from the owner's template: created/updated dates, aliases, parent,
-    links, the tag agent-memory, then a `# <title>` heading (added for you when the body has
-    none). `parent` is the hub note this one belongs under (for example "code-kvt"), `links`
-    are related notes; both are plain note names and may point at notes that do not exist yet.
-    All notes with the same topic share one branch and one PR, so pick one topic per subject
-    and reuse it. Never put credentials in the body.
+    topic: one per subject; notes with the same topic share one PR.
+    title: no colon (use an em dash). parent: the project hub name. links/aliases: optional.
     """
     if proposer is None:
         return _WRITE_OFF
@@ -135,12 +135,10 @@ def propose_note(topic: str, title: str, body: str, parent: str | list[str] | No
 
 @mcp.tool()
 def propose_edit(topic: str, path: str, body: str, reason: str | None = None) -> str:
-    """Propose a change to an EXISTING note; it lands in the topic's pull request for review.
+    """Propose a change to an EXISTING note. Send the complete new body without frontmatter;
+    tags are never changed. Never put credentials in it.
 
-    Send the complete new body WITHOUT the frontmatter (read the note first and edit its text):
-    the server keeps the frontmatter and bumps `updated`. Works on your own memory notes and on
-    the owner's notes alike, but a note's tags are never touched. `path` is the vault-relative
-    path as returned by search. Never put credentials in the body.
+    path: as returned by search. reason: one line, optional.
     """
     if proposer is None:
         return _WRITE_OFF
