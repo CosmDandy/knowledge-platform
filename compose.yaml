@@ -1,6 +1,9 @@
+name: knowledge-platform
+
 services:
   knowledge:
     build: .
+    image: knowledge-platform:latest
     container_name: knowledge-mcp
     restart: unless-stopped
     ports:
@@ -13,7 +16,7 @@ services:
       - knowledge-data:/data
     environment:
       KNOWLEDGE_INCLUDE: "${KNOWLEDGE_INCLUDE-01 Архив}"
-      KNOWLEDGE_GITHUB_REPO: "${KNOWLEDGE_GITHUB_REPO:-CosmDandy/KnowledgeBase}"
+      KNOWLEDGE_GITHUB_REPO: "${KNOWLEDGE_GITHUB_REPO:-CosmDandy/knowledge}"
       # Empty keeps the write tools off. Supply it from sops: sops exec-env secrets.sops.yaml 'docker compose up -d'
       KNOWLEDGE_GITHUB_TOKEN: "${KNOWLEDGE_GITHUB_TOKEN:-}"
     read_only: true

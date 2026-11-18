@@ -37,7 +37,7 @@ def _make_proposer() -> Proposer | None:
     token = os.environ.get("KNOWLEDGE_GITHUB_TOKEN")
     if not token:
         return None
-    gh = GitHub(os.environ.get("KNOWLEDGE_GITHUB_REPO", "CosmDandy/KnowledgeBase"), token)
+    gh = GitHub(os.environ.get("KNOWLEDGE_GITHUB_REPO", "CosmDandy/knowledge"), token)
     return Proposer(
         gh,
         prefix=os.environ.get("KNOWLEDGE_BRANCH_PREFIX", "knowledge"),
