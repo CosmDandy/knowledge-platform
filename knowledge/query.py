@@ -66,18 +66,29 @@ def _scope(memory: str, hub: str | None) -> tuple[str, list]:
     return sql, params
 
 
-def _keyword_hits(con: sqlite3.Connection, terms: list[str], scope: tuple[str, list]) -> list[sqlite3.Row]:
+def _keyword_hits(con: sqlite3.Connection, terms: list[str], scope: tuple[str, list]
+                  ) -> tuple[list[sqlite3.Row], str]:
     for op in ("AND", "OR"):  # fall back to OR only when the strict query finds nothing
+        match = _match(terms, op)
         rows = con.execute(
-            f"SELECT f.rowid AS chunk, snippet(fts, 4, '[', ']', '…', 24) AS snip, {_HIT_COLUMNS}, "
+            f"SELECT f.rowid AS chunk, {_HIT_COLUMNS}, "
             "bm25(fts, 0, 0, 5.0, 3.0, 1.0) AS score "
             "FROM fts f JOIN notes n ON n.id = f.note_id "
             "WHERE fts MATCH ?" + scope[0] + " ORDER BY score LIMIT ?",
-            (_match(terms, op), *scope[1], CANDIDATES),
+            (match, *scope[1], CANDIDATES),
         ).fetchall()
         if rows:
-            return rows
-    return []
+            return rows, match
+    return [], ""
+
+
+def _snippets(con: sqlite3.Connection, match: str, chunks: list[int]) -> dict[int, str]:
+    if not chunks:
+        return {}
+    placeholders = ",".join("?" for _ in chunks)
+    return dict(con.execute(
+        "SELECT rowid, snippet(fts, 4, '[', ']', '…', 24) FROM fts "
+        f"WHERE fts MATCH ? AND rowid IN ({placeholders})", (match, *chunks)))
 
 
 def _semantic_hits(con: sqlite3.Connection, query: str, scope: tuple[str, list],
@@ -116,8 +127,20 @@ def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "
         if hub is None:
             return {"error": f"parent {parent!r} is not a single known note (use its title, alias or path)"}
     scope = _scope(memory, hub)
+    if con.in_transaction:
+        return _search_matches(con, query, terms, limit, mode, embedder, scope)
+    # Keep the ranked rowids and deferred snippets on the same index snapshot.
+    con.execute("BEGIN")
+    try:
+        return _search_matches(con, query, terms, limit, mode, embedder, scope)
+    finally:
+        con.execute("ROLLBACK")
+
+
+def _search_matches(con: sqlite3.Connection, query: str, terms: list[str], limit: int,
+                    mode: str, embedder, scope: tuple[str, list]) -> dict:
     extra: dict = {}
-    keyword = _keyword_hits(con, terms, scope) if mode != "semantic" else []
+    keyword, match = _keyword_hits(con, terms, scope) if mode != "semantic" else ([], "")
     semantic: list[tuple[int, str, float]] = []
     if mode != "keyword":
         try:
@@ -126,7 +149,6 @@ def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "
             extra["semantic"] = "unavailable"
             if mode == "semantic":
                 return {"results": [], **extra}
-            keyword = keyword or _keyword_hits(con, terms, scope)
 
     # Rank notes, not chunks: a note's place in a list is where its best chunk stands.
     fused: dict[str, dict] = {}
@@ -141,14 +163,19 @@ def search(con: sqlite3.Connection, query: str, limit: int = 10, memory: str = "
             entry["score"] += 1 / (RRF_K + position + 1)
             entry["similarity"] = round(similarity, 3)
             entry["chunk"] = chunk
+    selected = sorted(fused.items(), key=lambda kv: -kv[1]["score"])[:limit]
+    snippets = _snippets(con, match, [e["row"]["chunk"] for _, e in selected if e["row"] is not None])
     results = []
-    for note_id, e in sorted(fused.items(), key=lambda kv: -kv[1]["score"])[:limit]:
+    for note_id, e in selected:
         r = e["row"]
         if r is None:  # found by meaning only: take the chunk that matched
-            r = con.execute(f"SELECT {_HIT_COLUMNS}, '' AS snip FROM fts f JOIN notes n ON n.id = f.note_id "
+            r = con.execute(f"SELECT {_HIT_COLUMNS} FROM fts f JOIN notes n ON n.id = f.note_id "
                             "WHERE f.rowid = ?", (e["chunk"],)).fetchone()
+            snip = ""
+        else:
+            snip = snippets[r["chunk"]]
         # A title-only match leaves the body without a highlight: show where the text starts instead.
-        snippet = r["snip"] if "[" in r["snip"] else " ".join(r["head"].split())
+        snippet = snip if "[" in snip else " ".join(r["head"].split())
         tags = json.loads(r["tags"])
         results.append({
             "path": note_id, "title": r["title"], "heading": r["heading"], "snippet": snippet,

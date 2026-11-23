@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from knowledge import index, query
 
@@ -73,6 +74,25 @@ class KP(unittest.TestCase):
         owner = [h["path"] for h in query.search(con, "Traefik", memory="owner")["results"]]
         self.assertEqual(owner, ["A/Traefik.md"])
         self.assertIn("error", query.search(con, "Traefik", memory="nonsense"))
+
+    def test_snippets_only_for_returned_notes_with_the_successful_match(self):
+        write(self.root, "A/Other.md", "Another host with IP 10.0.0.5.")
+        index.sync(self.root, self.db)
+        for text, op in (("10.0.0.5", "AND"), ("10.0.0.5 nonexistent", "OR")):
+            with self.subTest(text=text), patch.object(query, "_snippets", wraps=query._snippets) as snippets:
+                hits = query.search(self.con, text, limit=1)["results"]
+                self.assertEqual(len(hits), 1)
+                self.assertIn("[10.0.0.5]", hits[0]["snippet"])
+                _, match, chunks = snippets.call_args.args
+                self.assertEqual(match, query._match(text.split(), op))
+                self.assertEqual(len(chunks), 1)
+
+    def test_search_does_not_leave_a_snapshot_open_in_autocommit(self):
+        con = sqlite3.connect(self.db, autocommit=True)
+        self.addCleanup(con.close)
+        con.row_factory = sqlite3.Row
+        self.assertTrue(query.search(con, "10.0.0.5")["results"])
+        self.assertFalse(con.in_transaction)
 
     def test_snippet_falls_back_to_text_start_on_title_only_match(self):
         write(self.root, "A/Titleonly.md", "---\n---\nCompletely different words here.\n")
