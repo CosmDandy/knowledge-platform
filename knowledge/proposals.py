@@ -19,6 +19,7 @@ from .index import SECRET_LINE
 FORBIDDEN_TITLE = re.compile(r'[\\/:*?"<>|#^\[\]\n\r\t]')
 MAX_BODY = 200_000
 LEADING_FRONTMATTER = re.compile(r"\A\ufeff?---[ \t]*\r?\n.*?^---[ \t]*\r?$", re.MULTILINE | re.DOTALL)
+DEFAULT_MAX_OPEN_PRS = 30
 # Marks notes that are the agent's memory, not the owner's knowledge. Set only on creation.
 AGENT_TAG = "agent-memory"
 
@@ -75,7 +76,7 @@ def _q(s: str) -> str:
 
 class Proposer:
     def __init__(self, gh, prefix="knowledge", base="master", folder="01 Архив",
-                 max_open=5, max_files=20, exists=lambda title: False):
+                 max_open=DEFAULT_MAX_OPEN_PRS, max_files=20, exists=lambda title: False):
         self.gh, self.prefix, self.base, self.folder = gh, prefix, base, folder
         self.max_open, self.max_files, self.exists = max_open, max_files, exists
         self._orphans: set[str] = set()
@@ -165,7 +166,7 @@ class Proposer:
             raise ProposalError(f"cannot create branch {branch}: {status} {(body or {}).get('message', '')}")
 
     def _join_topic(self, slug: str):
-        """Return (branch, open PR or None). A new topic gets its branch; a full PR is refused."""
+        """Return the branch, its open PR (if any), and the open proposal count."""
         branch = f"{self.prefix}/{slug}"
         open_prs = self._open_prs()
         pr = next((p for p in open_prs if p["head"]["ref"] == branch), None)
@@ -177,7 +178,7 @@ class Proposer:
             if len(open_prs) >= self.max_open:
                 raise ProposalError(f"{self.max_open} proposals are already open; wait for review")
             self._ensure_branch(branch)
-        return branch, pr
+        return branch, pr, len(open_prs)
 
     def _ensure_pr(self, topic: str, branch: str, pr):
         """Open the PR for a topic on its first change. Returns (pr, is_new)."""
@@ -204,7 +205,7 @@ class Proposer:
         path = f"{self.folder}/{title}.md"
         if self.exists(title) or self._file_exists(path, self.base):
             raise ProposalError(f"a note named '{title}' already exists; propose a different title")
-        branch, pr = self._join_topic(slug)
+        branch, pr, open_prs = self._join_topic(slug)
         if self._file_exists(path, branch):
             raise ProposalError(f"'{title}' is already proposed in topic '{slug}'")
         self._guard(branch)
@@ -215,7 +216,7 @@ class Proposer:
             "branch": branch,
         })
         pr, new_pr = self._ensure_pr(topic, branch, pr)
-        return {"pr": pr["html_url"], "branch": branch, "path": path, "new_pr": new_pr}
+        return self._proposal_result(pr, branch, path, new_pr, open_prs)
 
     def propose_edit(self, topic: str, path: str, body: str, reason: str = "") -> dict:
         """Replace the body of an existing note. Frontmatter is kept as it is, apart from `updated`.
@@ -233,7 +234,7 @@ class Proposer:
             raise ProposalError("reason: one line, at most 300 chars")
         if not self._file_exists(path, self.base):
             raise ProposalError(f"no such note: {path}; use propose_note to create a new one")
-        branch, pr = self._join_topic(slugify(topic))
+        branch, pr, open_prs = self._join_topic(slugify(topic))
         current = self._call("GET", f"/contents/{_q(path)}?ref={_q(branch)}")
         old = base64.b64decode(current["content"]).decode()
         match = re.match(r"\A---\n.*?\n---\n?", old, re.DOTALL)
@@ -252,8 +253,12 @@ class Proposer:
             "branch": branch,
         })
         pr, new_pr = self._ensure_pr(topic, branch, pr)
-        return {"pr": pr["html_url"], "branch": branch, "path": path, "new_pr": new_pr,
+        return {**self._proposal_result(pr, branch, path, new_pr, open_prs),
                 "owner_note": whose != AGENT_TAG}
+
+    def _proposal_result(self, pr, branch, path, new_pr, open_prs) -> dict:
+        return {"pr": pr["html_url"], "branch": branch, "path": path, "new_pr": new_pr,
+                "open_prs": open_prs + int(new_pr), "max_open_prs": self.max_open}
 
     def cleanup(self) -> list[str]:
         """Delete topic branches that have no open PR (merged or closed).

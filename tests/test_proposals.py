@@ -127,6 +127,7 @@ class ProposalTests(unittest.TestCase):
     def test_edit_keeps_owner_note_tags_and_bumps_updated(self):
         r = self.p.propose_edit("fixes", "01 Архив/Existing.md", "New body.", reason="stale")
         self.assertTrue(r["owner_note"])
+        self.assertEqual((r["new_pr"], r["open_prs"], r["max_open_prs"]), (True, 1, 30))
         text = self.gh.files[("knowledge/fixes", "01 Архив/Existing.md")]
         self.assertIn("tags:\n  - 1_Исследуется\n", text)
         self.assertNotIn("agent-memory", text)           # the tag is never added to the owner's note
@@ -228,6 +229,19 @@ class ProposalTests(unittest.TestCase):
             small.propose_note("t", "C", "3")       # PR is full
         with self.assertRaises(ProposalError):
             small.propose_note("other", "D", "4")   # too many open PRs
+
+    def test_default_limit_accepts_thirtieth_pr_but_refuses_a_new_topic_afterwards(self):
+        for i in range(30):
+            result = self.p.propose_note(f"topic-{i}", f"Note {i}", "Body.")
+            self.assertEqual((result["new_pr"], result["open_prs"], result["max_open_prs"]), (True, i + 1, 30))
+        with self.assertRaisesRegex(ProposalError, "30 proposals are already open"):
+            self.p.propose_note("overflow", "Overflow", "Body.")
+        self.assertNotIn("knowledge/overflow", self.gh.branches)
+        self.assertEqual(len(self.gh.commits), 30)
+
+        result = self.p.propose_note("topic-0", "Follow-up", "Body.")
+        self.assertEqual((result["new_pr"], result["open_prs"]), (False, 30))
+        self.assertEqual(len(self.gh.prs), 30)
 
     def test_cleanup_needs_two_sightings_and_keeps_open_prs(self):
         self.p.propose_note("keep", "A", "1")

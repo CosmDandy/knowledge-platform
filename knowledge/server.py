@@ -14,7 +14,7 @@ import time
 from mcp.server.mcpserver import MCPServer
 
 from . import auth, embeddings, index, query
-from .proposals import GitHub, ProposalError, Proposer
+from .proposals import DEFAULT_MAX_OPEN_PRS, GitHub, ProposalError, Proposer
 
 VAULT = os.environ.get("KNOWLEDGE_VAULT", "/vault")
 DB = os.environ.get("KNOWLEDGE_DB", "/data/knowledge.db")
@@ -54,13 +54,15 @@ def _make_proposer() -> Proposer | None:
         prefix=os.environ.get("KNOWLEDGE_BRANCH_PREFIX", "knowledge"),
         base=os.environ.get("KNOWLEDGE_BASE_BRANCH", "master"),
         folder=os.environ.get("KNOWLEDGE_NOTES_FOLDER", "01 Архив"),
-        max_open=int(os.environ.get("KNOWLEDGE_MAX_OPEN_PRS", "5")),
+        max_open=int(os.environ.get("KNOWLEDGE_MAX_OPEN_PRS", DEFAULT_MAX_OPEN_PRS)),
         max_files=int(os.environ.get("KNOWLEDGE_MAX_FILES_PER_PR", "20")),
         exists=_title_exists,
     )
 
 
 proposer = _make_proposer()
+# Keep the capacity check and PR creation together across concurrent MCP calls.
+_proposal_lock = threading.Lock()
 _WRITE_OFF = json.dumps({"error": "writing is disabled: KNOWLEDGE_GITHUB_TOKEN is not set"})
 
 
@@ -118,7 +120,8 @@ def propose_note(topic: str, title: str, body: str, parent: str | list[str] | No
     if proposer is None:
         return _WRITE_OFF
     try:
-        result = proposer.propose_note(topic, title, body, parent, links, aliases)
+        with _proposal_lock:
+            result = proposer.propose_note(topic, title, body, parent, links, aliases)
     except ProposalError as e:
         return _j({"error": str(e)})
     if embedder:
@@ -144,7 +147,9 @@ def propose_edit(topic: str, path: str, body: str, reason: str | None = None) ->
     if proposer is None:
         return _WRITE_OFF
     try:
-        return _j(proposer.propose_edit(topic, path, body, reason or ""))
+        with _proposal_lock:
+            result = proposer.propose_edit(topic, path, body, reason or "")
+        return _j(result)
     except ProposalError as e:
         return _j({"error": str(e)})
 
