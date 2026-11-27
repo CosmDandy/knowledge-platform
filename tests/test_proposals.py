@@ -137,6 +137,21 @@ class ProposalTests(unittest.TestCase):
         self.assertIn("(owner's note)", self.gh.commits[-1])
         self.assertIn("stale", self.gh.commits[-1])
 
+    def test_edit_rejects_the_full_note_before_creating_a_branch(self):
+        path = "01 Архив/Existing.md"
+        old = self.gh.files[("master", path)]
+        with self.assertRaisesRegex(ProposalError, "body must not include frontmatter"):
+            self.p.propose_edit("fixes", path, old.replace("Old body.", "New body."))
+        self.assertEqual(set(self.gh.branches), {"master"})
+        self.assertEqual(self.gh.commits, [])
+        self.assertEqual(self.gh.prs, [])
+
+    def test_edit_accepts_a_thematic_break_after_the_title(self):
+        body = "# Existing\n\n---\n\nA paragraph.\n\n---\n\nAnother paragraph."
+        self.p.propose_edit("fixes", "01 Архив/Existing.md", body)
+        text = self.gh.files[("knowledge/fixes", "01 Архив/Existing.md")]
+        self.assertTrue(text.endswith(f"\n---\n{body}\n"))
+
     def test_edit_of_agent_memory_is_labelled_and_shares_the_topic_pr(self):
         self.p.propose_note("t", "A", "one")
         r = self.p.propose_edit("t", "01 Архив/Memo.md", "Updated memo.")
@@ -190,6 +205,14 @@ class ProposalTests(unittest.TestCase):
         for kw in bad:
             with self.assertRaises(ProposalError, msg=str(kw)):
                 self.p.propose_note(**kw)
+        self.assertEqual(self.gh.prs, [])
+
+    def test_new_note_rejects_frontmatter_in_the_body(self):
+        body = "\n---\r\ntags:\r\n  - custom\r\n---\r\n# Note\r\n\r\nText."
+        with self.assertRaisesRegex(ProposalError, "body must not include frontmatter"):
+            self.p.propose_note("t", "Note", body)
+        self.assertEqual(set(self.gh.branches), {"master"})
+        self.assertEqual(self.gh.commits, [])
         self.assertEqual(self.gh.prs, [])
 
     def test_duplicate_in_branch_rejected(self):

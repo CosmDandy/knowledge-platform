@@ -135,8 +135,9 @@ def propose_note(topic: str, title: str, body: str, parent: str | list[str] | No
 
 @mcp.tool()
 def propose_edit(topic: str, path: str, body: str, reason: str | None = None) -> str:
-    """Propose a change to an EXISTING note. Send the complete new body without frontmatter;
-    tags are never changed. Never put credentials in it.
+    """Propose a change to an EXISTING note. Send the complete new body without frontmatter.
+    If using text from `read`, remove the leading Properties block first. Tags are never
+    changed. Never put credentials in it.
 
     path: as returned by search. reason: one line, optional.
     """

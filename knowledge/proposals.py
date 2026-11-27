@@ -18,6 +18,7 @@ from .index import SECRET_LINE
 
 FORBIDDEN_TITLE = re.compile(r'[\\/:*?"<>|#^\[\]\n\r\t]')
 MAX_BODY = 200_000
+LEADING_FRONTMATTER = re.compile(r"\A\ufeff?---[ \t]*\r?\n.*?^---[ \t]*\r?$", re.MULTILINE | re.DOTALL)
 # Marks notes that are the agent's memory, not the owner's knowledge. Set only on creation.
 AGENT_TAG = "agent-memory"
 
@@ -117,16 +118,23 @@ class Proposer:
             raise ProposalError(f"{what}: at most 20 entries")
         return out
 
+    @staticmethod
+    def _validate_body(body: str) -> None:
+        text = body.strip()
+        if not text or len(body) > MAX_BODY:
+            raise ProposalError(f"body must be non-empty and at most {MAX_BODY} chars")
+        if LEADING_FRONTMATTER.match(text):
+            raise ProposalError("body must not include frontmatter; send only the Markdown after the Properties block")
+        if SECRET_LINE.search(body) or "PRIVATE KEY" in body:
+            raise ProposalError("body looks like it contains a credential: remove it and refer to the secret store")
+
     def _validate(self, topic, title, body) -> str:
         if not (topic or "").strip():
             raise ProposalError("topic is empty: name the subject this note belongs to")
         slug = slugify(topic)
         if not title or len(title) > 120 or FORBIDDEN_TITLE.search(title) or title.startswith("."):
             raise ProposalError("title must be 1-120 chars without / \\ : * ? \" < > | # ^ [ ] or line breaks")
-        if not body.strip() or len(body) > MAX_BODY:
-            raise ProposalError(f"body must be non-empty and at most {MAX_BODY} chars")
-        if SECRET_LINE.search(body) or "PRIVATE KEY" in body:
-            raise ProposalError("body looks like it contains a credential: remove it and refer to the secret store")
+        self._validate_body(body)
         return slug
 
     def _render(self, title, body, parents, links, aliases) -> str:
@@ -220,10 +228,7 @@ class Proposer:
         if (not path.startswith(self.folder + "/") or not path.endswith(".md")
                 or ".." in path.split("/") or "\\" in path):
             raise ProposalError(f"path must be a note under '{self.folder}/', as returned by search")
-        if not body.strip() or len(body) > MAX_BODY:
-            raise ProposalError(f"body must be non-empty and at most {MAX_BODY} chars")
-        if SECRET_LINE.search(body) or "PRIVATE KEY" in body:
-            raise ProposalError("body looks like it contains a credential: remove it and refer to the secret store")
+        self._validate_body(body)
         if len(reason) > 300 or "\n" in reason:
             raise ProposalError("reason: one line, at most 300 chars")
         if not self._file_exists(path, self.base):
